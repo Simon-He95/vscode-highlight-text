@@ -1,8 +1,21 @@
-<p align="center">
-<img height="200" src="./assets/kv.png" alt="to unocss">
-</p>
-<p align="center"> English | <a href="./README_zh.md">简体中文</a></p>
+Emphasize `v-if`, `v-else-if`, `v-else` in vue, because it is very important, I want to highlight it.
 
+## Configuration
+```typescript
+  // You can configure the style you want through setting.
+   "vscode-highlight-v-if.style": {
+          "type": "object",
+          "default": {
+            "light": {
+              "color": "rgb(248 113 113)"
+            },
+            "dark": {
+              "color": "rgb(248 113 113)"
+            }
+          },
+          "description": "v-if style"
+        }
+```
 
 ## :coffee:
 
