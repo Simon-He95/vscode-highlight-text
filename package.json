@@ -2,7 +2,7 @@
   "publisher": "simonhe",
   "name": "vscode-highlight-v-if",
   "displayName": "vscode-highlight-v-if",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "packageManager": "pnpm@8.10.5",
   "description": "vscode-highlight-v-if",
   "author": "Simon He <https://github.com/Simon-He95>",
