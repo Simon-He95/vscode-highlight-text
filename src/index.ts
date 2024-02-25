@@ -1,4 +1,4 @@
-import { addEventListener, createRange, createStyle, getActiveText, getActiveTextEditor, getActiveTextEditorLanguageId, getConfiguration, getPosition } from '@vscode-use/utils'
+import { addEventListener, createRange, createStyle, getActiveText, setStyle, getActiveTextEditorLanguageId, getConfiguration, getPosition } from '@vscode-use/utils'
 import type { Disposable, ExtensionContext } from 'vscode'
 
 export async function activate(context: ExtensionContext) {
@@ -6,18 +6,18 @@ export async function activate(context: ExtensionContext) {
 
   const userConfigurationStyle = getConfiguration('vscode-highlight-v-if.style')
   const style = createStyle(userConfigurationStyle)
-  const setStyle = (style: any, range: any) => {
-    const activeTextEditor = getActiveTextEditor()
-    if (!activeTextEditor)
-      return
+  // const setStyle = (style: any, range: any) => {
+  //   const activeTextEditor = getActiveTextEditor()
+  //   if (!activeTextEditor)
+  //     return
 
-    const rangeOrOptins = range
-      ? (range as any).length
-          ? range
-          : [range]
-      : []
-    return activeTextEditor.setDecorations(style, rangeOrOptins as any[])
-  }
+  //   const rangeOrOptins = range
+  //     ? (range as any).length
+  //         ? range
+  //         : [range]
+  //     : []
+  //   return activeTextEditor.setDecorations(style, rangeOrOptins as any[])
+  // }
   const updateVIfStyle = () => {
     const isVue = getActiveTextEditorLanguageId() === 'vue'
     const text = getActiveText()
@@ -34,6 +34,7 @@ export async function activate(context: ExtensionContext) {
   }
   updateVIfStyle()
   disposes.push(addEventListener('text-change', updateVIfStyle))
+  disposes.push(addEventListener('activeText-change', updateVIfStyle))
   context.subscriptions.push(...disposes)
 }
 

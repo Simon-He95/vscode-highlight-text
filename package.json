@@ -68,7 +68,7 @@
     "@simon_he/eslint-config": "^0.0.6",
     "@types/node": "^18.18.12",
     "@types/vscode": "^1.84.2",
-    "@vscode-use/utils": "^0.0.84",
+    "@vscode-use/utils": "^0.0.85",
     "bumpp": "^9.2.0",
     "eslint": "^8.54.0",
     "esno": "^0.16.3",
