@@ -1,20 +1,20 @@
 {
   "publisher": "simonhe",
-  "name": "vscode-highlight-v-if",
-  "displayName": "vscode-highlight-v-if",
-  "version": "0.0.2",
+  "name": "vscode-vue-highlight",
+  "displayName": "vscode-vue-highlight",
+  "version": "0.0.0",
   "packageManager": "pnpm@8.10.5",
-  "description": "vscode-highlight-v-if",
+  "description": "vscode-vue-highlight",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
   "funding": "https://github.com/sponsors/Simon-He95",
-  "homepage": "https://github.com/Simon-He95/vscode-highlight-v-if#readme",
+  "homepage": "https://github.com/Simon-He95/vscode-vue-highlight#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Simon-He95/vscode-highlight-v-if"
+    "url": "https://github.com/Simon-He95/vscode-vue-highlight"
   },
   "bugs": {
-    "url": "https://github.com/Simon-He95/vscode-highlight-v-if/issues"
+    "url": "https://github.com/Simon-He95/vscode-vue-highlight/issues"
   },
   "sponsor": {
     "url": "https://github.com/Simon-He95/sponsor"
@@ -36,20 +36,8 @@
   "contributes": {
     "configuration": {
       "type": "object",
-      "title": "vscode-highlight-v-if",
+      "title": "vscode-vue-highlight",
       "properties": {
-        "vscode-highlight-v-if.style": {
-          "type": "object",
-          "default": {
-            "light": {
-              "color": "rgb(248 113 113)"
-            },
-            "dark": {
-              "color": "rgb(248 113 113)"
-            }
-          },
-          "description": "v-if style"
-        },
         "vscode-vue-highlight.rules": {
           "type": "object",
           "default": {
@@ -61,6 +49,9 @@
               ],
               "#B392F0": [
                 "v-for"
+              ],
+              "#FFC83D": [
+                "v-bind"
               ]
             },
             "dark": {
@@ -71,7 +62,13 @@
               ],
               "#B392F0": [
                 "v-for"
-              ]
+              ],
+              "#FFC83D": {
+                "match": [
+                  "v-bind"
+                ],
+                "backgroundColor": "red"
+              }
             }
           },
           "description": "v- highlight style"

@@ -7,10 +7,20 @@ Emphasize `v-if`, `v-else-if`, `v-else` in vue, because it is very important, I 
           "type": "object",
           "default": {
             "light": {
-              "color": "rgb(248 113 113)"
+              "rgb(248 113 113)": [
+                  "v-if",
+                  "v-else-if",
+                  "v-else"
+                ],
+                "#B392F0": [
+                  "v-for"
+                ],
+                "#B392F0": {
+                  "match": ["v-xx"],
+                  ...customerStyle
+                }
             },
             "dark": {
-              "color": "rgb(248 113 113)"
             }
           },
           "description": "v-if style"
