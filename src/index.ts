@@ -44,6 +44,7 @@ export async function activate(context: ExtensionContext) {
   updateVStyle()
   disposes.push(addEventListener('text-change', updateVStyle))
   disposes.push(addEventListener('activeText-change', updateVStyle))
+  disposes.push(addEventListener('config-change', updateVStyle))
   context.subscriptions.push(...disposes)
 }
 
