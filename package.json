@@ -63,12 +63,9 @@
               "#B392F0": [
                 "v-for"
               ],
-              "#FFC83D": {
-                "match": [
-                  "v-bind"
-                ],
-                "backgroundColor": "red"
-              }
+              "#FFC83D": [
+                "v-bind"
+              ]
             }
           },
           "description": "v- highlight style"

@@ -1,29 +1,47 @@
-Emphasize `v-if`, `v-else-if`, `v-else` in vue, because it is very important, I want to highlight it.
+Highlight `v-if`, `v-else-if`, `v-else`... in vue, because it is very important. I want to highlight it, and I can also customize the configuration to emphasize the attributes highlighted.
+
+![demo](/assets/demo.jpg)
 
 ## Configuration
 ```typescript
   // You can configure the style you want through setting.
-   "vscode-highlight-v-if.style": {
+        "vscode-vue-highlight.rules": {
           "type": "object",
           "default": {
             "light": {
               "rgb(248 113 113)": [
-                  "v-if",
-                  "v-else-if",
-                  "v-else"
+                "v-if",
+                "v-else-if",
+                "v-else"
+              ],
+              "#B392F0": [
+                "v-for"
+              ],
+              "#FFC83D": {
+                match: [
+                "v-bind"
                 ],
-                "#B392F0": [
-                  "v-for"
-                ],
-                "#B392F0": {
-                  "match": ["v-xx"],
-                  ...customerStyle
-                }
+                ...customStyle
+              }
             },
             "dark": {
+              "rgb(248 113 113)": [
+                "v-if",
+                "v-else-if",
+                "v-else"
+              ],
+              "#B392F0": [
+                "v-for"
+              ],
+              "#FFC83D": {
+                "match": [
+                  "v-bind"
+                ],
+                "backgroundColor": "red"
+              }
             }
           },
-          "description": "v-if style"
+          "description": "v- highlight style"
         }
 ```
 

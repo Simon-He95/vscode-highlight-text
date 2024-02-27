@@ -1,21 +1,50 @@
-强调突出 vue 中的 `v-if`、`v-else-if`、`v-else`,因为它很重要，我希望特别强调突出它
+强调突出 vue 中的 `v-if`、`v-else-if`、`v-else`...,因为它很重要，我希望特别强调突出它,也可以自定义配置希望强调突出的属性。
+
+![demo](/assets/demo.jpg)
 
 ## Configuration
 ```typescript
-  // 可以通过 setting 去配置自己想要的style
-   "vscode-highlight-v-if.style": {
+  // 自定义设置高亮样式
+        "vscode-vue-highlight.rules": {
           "type": "object",
           "default": {
             "light": {
-              "color": "rgb(248 113 113)"
+              "rgb(248 113 113)": [
+                "v-if",
+                "v-else-if",
+                "v-else"
+              ],
+              "#B392F0": [
+                "v-for"
+              ],
+              "#FFC83D": {
+                match: [
+                "v-bind"
+                ],
+                ...customStyle // 自定义style，比如backgroundColor
+              }
             },
             "dark": {
-              "color": "rgb(248 113 113)"
+              "rgb(248 113 113)": [
+                "v-if",
+                "v-else-if",
+                "v-else"
+              ],
+              "#B392F0": [
+                "v-for"
+              ],
+              "#FFC83D": {
+                "match": [
+                  "v-bind"
+                ],
+                "backgroundColor": "red"
+              }
             }
           },
-          "description": "v-if style"
+          "description": "v- highlight style"
         }
 ```
+
 
 ## :coffee:
 
