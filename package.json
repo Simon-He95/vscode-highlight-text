@@ -51,7 +51,21 @@
                 "v-for"
               ],
               "#FFC83D": [
-                "v-bind"
+                "v-bind",
+                "v-on",
+                "(v-slot:[^>\\s\\/>]+)",
+                "<template\\s+(#[^\\s\\/>]+)",
+                "v-html",
+                "v-text"
+              ],
+              "rgb(99, 102, 241)": [
+                ":is"
+              ],
+              "rgb(14, 165, 233)": [
+                "defineProps",
+                "defineOptions",
+                "defineEmits",
+                "defineExpose"
               ]
             },
             "dark": {
@@ -64,7 +78,21 @@
                 "v-for"
               ],
               "#FFC83D": [
-                "v-bind"
+                "<template\\s+(\\#[^\\s\\/>]+)",
+                "v-bind",
+                "v-on",
+                "(v-slot:[^>\\s\\/>]+)",
+                "v-html",
+                "v-text"
+              ],
+              "rgb(99, 102, 241)": [
+                ":is"
+              ],
+              "rgb(14, 165, 233)": [
+                "defineProps",
+                "defineOptions",
+                "defineEmits",
+                "defineExpose"
               ]
             }
           },

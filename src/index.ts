@@ -5,6 +5,9 @@ export interface UserConfig {
   match: string[]
   [key: string]: any
 }
+export function isReg(o: any): o is RegExp {
+  return typeof o === 'object' && o.constructor === RegExp
+}
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
@@ -17,7 +20,6 @@ export async function activate(context: ExtensionContext) {
     clearStyle.length = 0
     if (!text || !isVue)
       return
-    let style: any
     for (const color in userConfigurationStyle) {
       let option = userConfigurationStyle[color] as string[] | UserConfig
       const ranges: any = []
@@ -27,16 +29,18 @@ export async function activate(context: ExtensionContext) {
         styleOption = Object.assign({}, option) as any
         option = option.match
       }
-      style = createStyle(styleOption)
+      const style = createStyle(styleOption)
       if (Array.isArray(option) && option.length) {
         const reg = new RegExp(option.join('|'), 'g')
         for (const matcher of text.matchAll(reg)) {
-          const start = matcher.index!
-          const end = start + matcher[0].length
+          const start = matcher[1] ? matcher.index! + matcher[0].indexOf(matcher[1]) : matcher.index!
+          const end = start + (matcher[1] ? matcher[1].length : matcher[0].length)
           const range = createRange(getPosition(start), getPosition(end))
           ranges.push(range)
         }
-        setStyle(style, ranges)
+        if (ranges.length)
+          setStyle(style, ranges)
+
         clearStyle.push(() => setStyle(style))
       }
     }
