@@ -51,10 +51,10 @@
                 "v-for"
               ],
               "#FFC83D": [
+                "<template\\s+(\\#[^\\s\\/>]+)",
                 "v-bind",
                 "v-on",
                 "(v-slot:[^>\\s\\/>]+)",
-                "<template\\s+(#[^\\s\\/>]+)",
                 "v-html",
                 "v-text"
               ],
