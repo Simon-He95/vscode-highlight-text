@@ -49,6 +49,32 @@
             }
           },
           "description": "v-if style"
+        },
+        "vscode-vue-highlight.rules": {
+          "type": "object",
+          "default": {
+            "light": {
+              "rgb(248 113 113)": [
+                "v-if",
+                "v-else-if",
+                "v-else"
+              ],
+              "#B392F0": [
+                "v-for"
+              ]
+            },
+            "dark": {
+              "rgb(248 113 113)": [
+                "v-if",
+                "v-else-if",
+                "v-else"
+              ],
+              "#B392F0": [
+                "v-for"
+              ]
+            }
+          },
+          "description": "v- highlight style"
         }
       }
     }
