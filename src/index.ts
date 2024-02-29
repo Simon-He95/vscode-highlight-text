@@ -24,9 +24,9 @@ export async function activate(context: ExtensionContext) {
       let option = userConfigurationStyle[color] as string[] | UserConfig
       const ranges: any = []
 
-      let styleOption = { color }
+      let styleOption = { color, isWholeLine: false }
       if (!Array.isArray(option) && option.match) {
-        styleOption = Object.assign({}, option) as any
+        styleOption = Object.assign({ color }, option, { after: option.after }, { before: option.before }) as any
         option = option.match
       }
       const style = createStyle(styleOption)

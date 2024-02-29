@@ -42,11 +42,16 @@
           "type": "object",
           "default": {
             "light": {
-              "rgb(248 113 113)": [
-                "v-if",
-                "v-else-if",
-                "v-else"
-              ],
+              "rgb(248 113 113)": {
+                "match": [
+                  "v-if",
+                  "v-else-if",
+                  "v-else"
+                ],
+                "before": {
+                  "contentText": "⭐️"
+                }
+              },
               "#B392F0": [
                 "v-for"
               ],
@@ -69,11 +74,16 @@
               ]
             },
             "dark": {
-              "rgb(248 113 113)": [
-                "v-if",
-                "v-else-if",
-                "v-else"
-              ],
+              "rgb(248 113 113)": {
+                "match": [
+                  "v-if",
+                  "v-else-if",
+                  "v-else"
+                ],
+                "before": {
+                  "contentText": "⭐️"
+                }
+              },
               "#B392F0": [
                 "v-for"
               ],
@@ -85,9 +95,11 @@
                 "v-html",
                 "v-text"
               ],
-              "rgb(99, 102, 241)": [
-                ":is"
-              ],
+              "rgb(99, 102, 241)": {
+                "match": [
+                  ":is"
+                ]
+              },
               "rgb(14, 165, 233)": [
                 "defineProps",
                 "defineOptions",
