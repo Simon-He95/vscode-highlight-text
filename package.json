@@ -41,72 +41,8 @@
         "vscode-vue-highlight.rules": {
           "type": "object",
           "default": {
-            "light": {
-              "rgb(248 113 113)": {
-                "match": [
-                  "v-if",
-                  "v-else-if",
-                  "v-else"
-                ],
-                "before": {
-                  "contentText": "⭐️"
-                }
-              },
-              "#B392F0": [
-                "v-for"
-              ],
-              "#FFC83D": [
-                "<template\\s+(\\#[^\\s\\/>]+)",
-                "v-bind",
-                "v-on",
-                "(v-slot:[^>\\s\\/>]+)",
-                "v-html",
-                "v-text"
-              ],
-              "rgb(99, 102, 241)": [
-                ":is"
-              ],
-              "rgb(14, 165, 233)": [
-                "defineProps",
-                "defineOptions",
-                "defineEmits",
-                "defineExpose"
-              ]
-            },
-            "dark": {
-              "rgb(248 113 113)": {
-                "match": [
-                  "v-if",
-                  "v-else-if",
-                  "v-else"
-                ],
-                "before": {
-                  "contentText": "⭐️"
-                }
-              },
-              "#B392F0": [
-                "v-for"
-              ],
-              "#FFC83D": [
-                "<template\\s+(\\#[^\\s\\/>]+)",
-                "v-bind",
-                "v-on",
-                "(v-slot:[^>\\s\\/>]+)",
-                "v-html",
-                "v-text"
-              ],
-              "rgb(99, 102, 241)": {
-                "match": [
-                  ":is"
-                ]
-              },
-              "rgb(14, 165, 233)": [
-                "defineProps",
-                "defineOptions",
-                "defineEmits",
-                "defineExpose"
-              ]
-            }
+            "light": {},
+            "dark": {}
           },
           "description": "v- highlight style"
         }

@@ -8,12 +8,80 @@ export interface UserConfig {
 export function isReg(o: any): o is RegExp {
   return typeof o === 'object' && o.constructor === RegExp
 }
+const defaultConfig = {
+  light: {
+    'rgb(248 113 113)': {
+      match: [
+        'v-if',
+        'v-else-if',
+        'v-else',
+      ],
+      before: {
+        contentText: '⭐️',
+      },
+    },
+    '#B392F0': [
+      'v-for',
+    ],
+    '#FFC83D': [
+      '<template\\s+(\\#[^\\s\\/>]+)',
+      'v-bind',
+      'v-on',
+      '(v-slot:[^>\\s\\/>]+)',
+      'v-html',
+      'v-text',
+    ],
+    'rgb(99, 102, 241)': [
+      ':is',
+    ],
+    'rgb(14, 165, 233)': [
+      'defineProps',
+      'defineOptions',
+      'defineEmits',
+      'defineExpose',
+    ],
+  },
+  dark: {
+    'rgb(248 113 113)': {
+      match: [
+        'v-if',
+        'v-else-if',
+        'v-else',
+      ],
+      before: {
+        contentText: '⭐️',
+      },
+    },
+    '#B392F0': [
+      'v-for',
+    ],
+    '#FFC83D': [
+      '<template\\s+(\\#[^\\s\\/>]+)',
+      'v-bind',
+      'v-on',
+      '(v-slot:[^>\\s\\/>]+)',
+      'v-html',
+      'v-text',
+    ],
+    'rgb(99, 102, 241)': {
+      match: [
+        ':is',
+      ],
+    },
+    'rgb(14, 165, 233)': [
+      'defineProps',
+      'defineOptions',
+      'defineEmits',
+      'defineExpose',
+    ],
+  },
+}
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
-  const userConfigurationStyle = getConfiguration('vscode-vue-highlight.rules')[isDark() ? 'dark' : 'light']
   const clearStyle: (() => void)[] = []
   const updateVStyle = () => {
+    const userConfigurationStyle = getConfiguration('vscode-vue-highlight.rules', defaultConfig)[isDark() ? 'dark' : 'light']
     const isVue = getActiveTextEditorLanguageId() === 'vue'
     const text = getActiveText()
     clearStyle.forEach(cb => cb())
