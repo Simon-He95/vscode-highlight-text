@@ -1,4 +1,4 @@
-import { addEventListener, createRange, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getPosition, isDark, setStyle } from '@vscode-use/utils'
+import { addEventListener, createRange, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, setStyle } from '@vscode-use/utils'
 import type { Disposable, ExtensionContext } from 'vscode'
 
 export interface UserConfig {
@@ -79,14 +79,25 @@ const defaultConfig = {
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
-  const clearStyle: (() => void)[] = []
+  const clearStyle: Record<string, (() => void)[]> = {}
   const updateVStyle = () => {
-    const userConfigurationStyle = getConfiguration('vscode-vue-highlight.rules', defaultConfig)[isDark() ? 'dark' : 'light']
+    const currentFileUrl = getCurrentFileUrl()
+    if (!currentFileUrl)
+      return
     const isVue = getActiveTextEditorLanguageId() === 'vue'
+    if (!isVue)
+      return
+
+    const userConfigurationStyle = getConfiguration('vscode-vue-highlight.rules', defaultConfig)[isDark() ? 'dark' : 'light']
+
+    const cache = clearStyle[currentFileUrl]
+    if (cache) {
+      cache.forEach(cb => cb())
+      cache.length = 0
+    }
     const text = getActiveText()
-    clearStyle.forEach(cb => cb())
-    clearStyle.length = 0
-    if (!text || !isVue)
+
+    if (!text)
       return
     for (const color in userConfigurationStyle) {
       let option = userConfigurationStyle[color] as string[] | UserConfig
@@ -108,8 +119,9 @@ export async function activate(context: ExtensionContext) {
         }
         if (ranges.length)
           setStyle(style, ranges)
-
-        clearStyle.push(() => setStyle(style))
+        if (!clearStyle[currentFileUrl])
+          clearStyle[currentFileUrl] = []
+        clearStyle[currentFileUrl].push(() => setStyle(style))
       }
     }
   }
