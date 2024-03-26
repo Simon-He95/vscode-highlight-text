@@ -8,74 +8,7 @@ export interface UserConfig {
 export function isReg(o: any): o is RegExp {
   return typeof o === 'object' && o.constructor === RegExp
 }
-const defaultConfig = {
-  light: {
-    'rgb(248 113 113)': {
-      match: [
-        'v-if',
-        'v-else-if',
-        'v-else',
-      ],
-      before: {
-        contentText: '⭐️',
-      },
-    },
-    '#B392F0': [
-      'v-for',
-    ],
-    '#FFC83D': [
-      '<template\\s+(\\#[^\\s\\/>]+)',
-      'v-bind',
-      'v-on',
-      '(v-slot:[^>\\s\\/>]+)',
-      'v-html',
-      'v-text',
-    ],
-    'rgb(99, 102, 241)': [
-      ':is',
-    ],
-    'rgb(14, 165, 233)': [
-      'defineProps',
-      'defineOptions',
-      'defineEmits',
-      'defineExpose',
-    ],
-  },
-  dark: {
-    'rgb(248 113 113)': {
-      match: [
-        'v-if',
-        'v-else-if',
-        'v-else',
-      ],
-      before: {
-        contentText: '⭐️',
-      },
-    },
-    '#B392F0': [
-      'v-for',
-    ],
-    '#FFC83D': [
-      '<template\\s+(\\#[^\\s\\/>]+)',
-      'v-bind',
-      'v-on',
-      '(v-slot:[^>\\s\\/>]+)',
-      'v-html',
-      'v-text',
-    ],
-    'rgb(99, 102, 241)': {
-      match: [
-        ':is',
-      ],
-    },
-    'rgb(14, 165, 233)': [
-      'defineProps',
-      'defineOptions',
-      'defineEmits',
-      'defineExpose',
-    ],
-  },
-}
+
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
@@ -84,13 +17,33 @@ export async function activate(context: ExtensionContext) {
     const currentFileUrl = getCurrentFileUrl(true)
     if (!currentFileUrl)
       return
-    const isVue = getActiveTextEditorLanguageId() === 'vue'
-    if (!isVue)
+    let lan = getActiveTextEditorLanguageId()
+    if (!lan)
       return
+
+    switch (lan) {
+      case 'vue':
+        lan = 'vue'
+        break
+      case 'javascriptreact':
+      case 'typescriptreact':
+        lan = 'react'
+        break
+      case 'svelte':
+        lan = 'svelte'
+        break
+      case 'solid':
+        lan = 'solid'
+        break
+      case 'astro':
+        lan = 'astro'
+    }
+
+    const userConfigurationStyle = getConfiguration('vscode-highlight.rules')[lan]?.[isDark() ? 'dark' : 'light']
+    if (!userConfigurationStyle)
+      return
+
     const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
-
-    const userConfigurationStyle = getConfiguration('vscode-vue-highlight.rules', defaultConfig)[isDark() ? 'dark' : 'light']
-
     const cache = clearStyle[cacheKey]
     if (cache) {
       cache.forEach(cb => cb())

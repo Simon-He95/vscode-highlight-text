@@ -1,47 +1,89 @@
-强调突出 vue 中的 `v-if`、`v-else-if`、`v-else`...,因为它很重要，我希望特别强调突出它,也可以自定义配置希望强调突出的属性。
+自定义配置任意语言的高亮语法，比如 vue、react、svelte、solid 等，你可以强调突出一些特定的语法或者事件，如果你觉得你搭配的风格很炫酷欢迎提 pr，可以作为内置的模板风格选择提供给更多人使用
 
 ![demo](/assets/demo.jpg)
 
 ## Configuration
 ```typescript
   // 自定义设置高亮样式
-        "vscode-vue-highlight.rules": {
+        "vscode-highlight.rules": {
           "type": "object",
           "default": {
-            "light": {
-              "rgb(248 113 113)": [
-                "v-if",
-                "v-else-if",
-                "v-else"
-              ],
-              "#B392F0": [
-                "v-for"
-              ],
-              "#FFC83D": {
-                match: [
-                "v-bind"
+            "vue": {
+              "light": {
+                "purple": {
+                  "match": [
+                    "v-if",
+                    "v-else-if",
+                    "v-else"
+                  ],
+                  "before": {
+                    "contentText": "✨"
+                  }
+                },
+                "#B392F0": [
+                  "v-for"
                 ],
-                ...customStyle // 自定义style，比如backgroundColor
+                "#FFC83D": [
+                  "<template\\s+(\\#[^\\s\\/>=]+)",
+                  "v-bind",
+                  "v-once",
+                  "v-on",
+                  "(v-slot:[^>\\s\\/>]+)",
+                  "v-html",
+                  "v-text"
+                ],
+                "rgb(99, 102, 241)": [
+                  ":is"
+                ],
+                "rgb(14, 165, 233)": [
+                  "(defineProps)[<\\(]",
+                  "defineOptions",
+                  "defineEmits",
+                  "defineExpose"
+                ]
+              },
+              "dark": {
+                "purple": {
+                  "match": [
+                    "v-if",
+                    "v-else-if",
+                    "v-else"
+                  ],
+                  "before": {
+                    "contentText": "✨"
+                  }
+                },
+                "#B392F0": [
+                  "v-for"
+                ],
+                "#FFC83D": [
+                  "<template\\s+(\\#[^\\s\\/>=]+)",
+                  "v-bind",
+                  "v-once",
+                  "v-on",
+                  "(v-slot:[^>\\s\\/>]+)",
+                  "v-html",
+                  "v-text"
+                ],
+                "rgb(99, 102, 241)": {
+                  "match": [
+                    ":is"
+                  ]
+                },
+                "rgb(14, 165, 233)": [
+                  "(defineProps)[<\\(]",
+                  "defineOptions",
+                  "defineEmits",
+                  "defineExpose"
+                ]
               }
             },
-            "dark": {
-              "rgb(248 113 113)": [
-                "v-if",
-                "v-else-if",
-                "v-else"
-              ],
-              "#B392F0": [
-                "v-for"
-              ],
-              "#FFC83D": {
-                "match": [
-                  "v-bind"
-                ],
-                "backgroundColor": "red"
-              }
+            "react": {
+              "light": {},
+              "dark": {}
             }
           },
-          "description": "v- highlight style"
+          "description": "highlight vue | react | svelte | solid | astro | ... style"
         }
 ```
 

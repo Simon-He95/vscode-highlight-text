@@ -1,47 +1,89 @@
-Highlight `v-if`, `v-else-if`, `v-else`... in vue, because it is very important. I want to highlight it, and I can also customize the configuration to emphasize the attributes highlighted.
+Customize the highlight syntax of any language, such as vue, react, svelte, solid, etc. You can highlight some specific syntax or events. If you think your matching style is very cool, welcome to mention pr, which can be used as a built-in template style for more people.
 
 ![demo](/assets/demo.jpg)
 
 ## Configuration
 ```typescript
   // You can configure the style you want through setting.
-        "vscode-vue-highlight.rules": {
+        "vscode-highlight.rules": {
           "type": "object",
           "default": {
-            "light": {
-              "rgb(248 113 113)": [
-                "v-if",
-                "v-else-if",
-                "v-else"
-              ],
-              "#B392F0": [
-                "v-for"
-              ],
-              "#FFC83D": {
-                match: [
-                "v-bind"
+            "vue": {
+              "light": {
+                "purple": {
+                  "match": [
+                    "v-if",
+                    "v-else-if",
+                    "v-else"
+                  ],
+                  "before": {
+                    "contentText": "✨"
+                  }
+                },
+                "#B392F0": [
+                  "v-for"
                 ],
-                ...customStyle
+                "#FFC83D": [
+                  "<template\\s+(\\#[^\\s\\/>=]+)",
+                  "v-bind",
+                  "v-once",
+                  "v-on",
+                  "(v-slot:[^>\\s\\/>]+)",
+                  "v-html",
+                  "v-text"
+                ],
+                "rgb(99, 102, 241)": [
+                  ":is"
+                ],
+                "rgb(14, 165, 233)": [
+                  "(defineProps)[<\\(]",
+                  "defineOptions",
+                  "defineEmits",
+                  "defineExpose"
+                ]
+              },
+              "dark": {
+                "purple": {
+                  "match": [
+                    "v-if",
+                    "v-else-if",
+                    "v-else"
+                  ],
+                  "before": {
+                    "contentText": "✨"
+                  }
+                },
+                "#B392F0": [
+                  "v-for"
+                ],
+                "#FFC83D": [
+                  "<template\\s+(\\#[^\\s\\/>=]+)",
+                  "v-bind",
+                  "v-once",
+                  "v-on",
+                  "(v-slot:[^>\\s\\/>]+)",
+                  "v-html",
+                  "v-text"
+                ],
+                "rgb(99, 102, 241)": {
+                  "match": [
+                    ":is"
+                  ]
+                },
+                "rgb(14, 165, 233)": [
+                  "(defineProps)[<\\(]",
+                  "defineOptions",
+                  "defineEmits",
+                  "defineExpose"
+                ]
               }
             },
-            "dark": {
-              "rgb(248 113 113)": [
-                "v-if",
-                "v-else-if",
-                "v-else"
-              ],
-              "#B392F0": [
-                "v-for"
-              ],
-              "#FFC83D": {
-                "match": [
-                  "v-bind"
-                ],
-                "backgroundColor": "red"
-              }
+            "react": {
+              "light": {},
+              "dark": {}
             }
           },
-          "description": "v- highlight style"
+          "description": "highlight vue | react | svelte | solid | astro | ... style"
         }
 ```
 

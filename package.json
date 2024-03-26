@@ -1,7 +1,7 @@
 {
   "publisher": "simonhe",
-  "name": "vscode-vue-highlight",
-  "displayName": "vscode-vue-highlight",
+  "name": "vscode-highlight",
+  "displayName": "vscode-highlight",
   "version": "0.0.8",
   "packageManager": "pnpm@8.10.5",
   "description": "vscode-vue-highlight",
@@ -36,15 +36,87 @@
   "contributes": {
     "configuration": {
       "type": "object",
-      "title": "vscode-vue-highlight",
+      "title": "vscode-highlight",
       "properties": {
-        "vscode-vue-highlight.rules": {
+        "vscode-highlight.rules": {
           "type": "object",
           "default": {
-            "light": {},
-            "dark": {}
+            "vue": {
+              "light": {
+                "purple": {
+                  "match": [
+                    "v-if",
+                    "v-else-if",
+                    "v-else"
+                  ],
+                  "before": {
+                    "contentText": "✨"
+                  }
+                },
+                "#B392F0": [
+                  "v-for"
+                ],
+                "#FFC83D": [
+                  "<template\\s+(\\#[^\\s\\/>=]+)",
+                  "v-bind",
+                  "v-once",
+                  "v-on",
+                  "(v-slot:[^>\\s\\/>]+)",
+                  "v-html",
+                  "v-text"
+                ],
+                "rgb(99, 102, 241)": [
+                  ":is"
+                ],
+                "rgb(14, 165, 233)": [
+                  "(defineProps)[<\\(]",
+                  "defineOptions",
+                  "defineEmits",
+                  "defineExpose"
+                ]
+              },
+              "dark": {
+                "purple": {
+                  "match": [
+                    "v-if",
+                    "v-else-if",
+                    "v-else"
+                  ],
+                  "before": {
+                    "contentText": "✨"
+                  }
+                },
+                "#B392F0": [
+                  "v-for"
+                ],
+                "#FFC83D": [
+                  "<template\\s+(\\#[^\\s\\/>=]+)",
+                  "v-bind",
+                  "v-once",
+                  "v-on",
+                  "(v-slot:[^>\\s\\/>]+)",
+                  "v-html",
+                  "v-text"
+                ],
+                "rgb(99, 102, 241)": {
+                  "match": [
+                    ":is"
+                  ]
+                },
+                "rgb(14, 165, 233)": [
+                  "(defineProps)[<\\(]",
+                  "defineOptions",
+                  "defineEmits",
+                  "defineExpose"
+                ]
+              }
+            },
+            "react": {
+              "light": {},
+              "dark": {}
+            }
           },
-          "description": "v- highlight style"
+          "description": "highlight vue | react | svelte | solid | astro | ... style"
         }
       }
     }
