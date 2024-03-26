@@ -2,7 +2,7 @@
   "publisher": "simonhe",
   "name": "vscode-vue-highlight",
   "displayName": "vscode-vue-highlight",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "packageManager": "pnpm@8.10.5",
   "description": "vscode-vue-highlight",
   "author": "Simon He <https://github.com/Simon-He95>",
