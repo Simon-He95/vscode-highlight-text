@@ -1,3 +1,8 @@
+<p align="center">
+<img height="200" src="./icon.png" alt="vscode-highlight-text">
+</p>
+<p align="center"> English | <a href="./README_zh.md">简体中文</a></p>
+
 Customize the highlight syntax of any language, such as vue, react, svelte, solid, etc. You can highlight some specific syntax or events. If you think your matching style is very cool, welcome to mention pr, which can be used as a built-in template style for more people.
 
 ![demo](/assets/demo.jpg)

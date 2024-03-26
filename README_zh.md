@@ -1,3 +1,8 @@
+<p align="center">
+<img height="200" src="./icon.png" alt="vscode-highlight-text">
+</p>
+<p align="center"> <a href="./README.md">English</a> | 简体中文</p>
+
 自定义配置任意语言的高亮语法，比如 vue、react、svelte、solid 等，你可以强调突出一些特定的语法或者事件，如果你觉得你搭配的风格很炫酷欢迎提 pr，可以作为内置的模板风格选择提供给更多人使用
 
 ![demo](/assets/demo.jpg)
