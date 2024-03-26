@@ -3,7 +3,7 @@
 </p>
 <p align="center"> English | <a href="./README_zh.md">简体中文</a></p>
 
-Customize the highlight syntax of any language, such as vue, react, svelte, solid, etc. You can highlight some specific syntax or events. If you think your matching style is very cool, welcome to mention pr, which can be used as a built-in template style for more people.
+Customize the highlight syntax of any language, such as vue, react, svelte, solid, etc. You can emphasize some specific syntax or events, make it easier for you to read the code and make your editor look more unique. If you think your matching style is cool, welcome to mention pr, which can be used as a built-in template style for more people.
 
 ![demo](/assets/demo.jpg)
 
