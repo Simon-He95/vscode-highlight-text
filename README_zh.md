@@ -5,7 +5,7 @@
 ## Configuration
 ```typescript
   // 自定义设置高亮样式
-        "vscode-highlight.rules": {
+        "vscode-highlight-text.rules": {
           "type": "object",
           "default": {
             "vue": {

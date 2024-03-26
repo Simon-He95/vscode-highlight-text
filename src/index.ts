@@ -39,7 +39,7 @@ export async function activate(context: ExtensionContext) {
         lan = 'astro'
     }
 
-    const userConfigurationStyle = getConfiguration('vscode-highlight.rules')[lan]?.[isDark() ? 'dark' : 'light']
+    const userConfigurationStyle = getConfiguration('vscode-highlight-text.rules')[lan]?.[isDark() ? 'dark' : 'light']
     if (!userConfigurationStyle)
       return
 

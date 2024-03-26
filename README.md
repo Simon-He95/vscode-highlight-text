@@ -5,7 +5,7 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 ## Configuration
 ```typescript
   // You can configure the style you want through setting.
-        "vscode-highlight.rules": {
+        "vscode-highlight-text.rules": {
           "type": "object",
           "default": {
             "vue": {

@@ -1,20 +1,20 @@
 {
   "publisher": "simonhe",
-  "name": "vscode-highlight",
-  "displayName": "vscode-highlight",
+  "name": "vscode-highlight-text",
+  "displayName": "vscode-highlight-text",
   "version": "0.0.9",
   "packageManager": "pnpm@8.10.5",
-  "description": "vscode-vue-highlight",
+  "description": "vscode-highlight-text",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
   "funding": "https://github.com/sponsors/Simon-He95",
-  "homepage": "https://github.com/Simon-He95/vscode-vue-highlight#readme",
+  "homepage": "https://github.com/Simon-He95/vscode-highlight-text#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Simon-He95/vscode-vue-highlight"
+    "url": "https://github.com/Simon-He95/vscode-highlight-text"
   },
   "bugs": {
-    "url": "https://github.com/Simon-He95/vscode-vue-highlight/issues"
+    "url": "https://github.com/Simon-He95/vscode-highlight-text/issues"
   },
   "sponsor": {
     "url": "https://github.com/Simon-He95/sponsor"
@@ -36,9 +36,9 @@
   "contributes": {
     "configuration": {
       "type": "object",
-      "title": "vscode-highlight",
+      "title": "vscode-highlight-text",
       "properties": {
-        "vscode-highlight.rules": {
+        "vscode-highlight-text.rules": {
           "type": "object",
           "default": {
             "vue": {
