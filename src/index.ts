@@ -81,16 +81,17 @@ export async function activate(context: ExtensionContext) {
 
   const clearStyle: Record<string, (() => void)[]> = {}
   const updateVStyle = () => {
-    const currentFileUrl = getCurrentFileUrl()
+    const currentFileUrl = getCurrentFileUrl(true)
     if (!currentFileUrl)
       return
     const isVue = getActiveTextEditorLanguageId() === 'vue'
     if (!isVue)
       return
+    const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
 
     const userConfigurationStyle = getConfiguration('vscode-vue-highlight.rules', defaultConfig)[isDark() ? 'dark' : 'light']
 
-    const cache = clearStyle[currentFileUrl]
+    const cache = clearStyle[cacheKey]
     if (cache) {
       cache.forEach(cb => cb())
       cache.length = 0
@@ -119,9 +120,9 @@ export async function activate(context: ExtensionContext) {
         }
         if (ranges.length)
           setStyle(style, ranges)
-        if (!clearStyle[currentFileUrl])
-          clearStyle[currentFileUrl] = []
-        clearStyle[currentFileUrl].push(() => setStyle(style))
+        if (!clearStyle[cacheKey])
+          clearStyle[cacheKey] = []
+        clearStyle[cacheKey].push(() => setStyle(style))
       }
     }
   }
