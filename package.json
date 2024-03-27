@@ -41,80 +41,12 @@
         "vscode-highlight-text.rules": {
           "type": "object",
           "default": {
-            "vue": {
-              "light": {
-                "purple": {
-                  "match": [
-                    "v-if",
-                    "v-else-if",
-                    "v-else"
-                  ],
-                  "before": {
-                    "contentText": "✨"
-                  }
-                },
-                "#B392F0": [
-                  "v-for"
-                ],
-                "#FFC83D": [
-                  "<template\\s+(\\#[^\\s\\/>=]+)",
-                  "v-bind",
-                  "v-once",
-                  "v-on",
-                  "(v-slot:[^>\\s\\/>]+)",
-                  "v-html",
-                  "v-text"
-                ],
-                "rgb(99, 102, 241)": [
-                  ":is"
-                ],
-                "rgb(14, 165, 233)": [
-                  "(defineProps)[<\\(]",
-                  "defineOptions",
-                  "defineEmits",
-                  "defineExpose"
-                ]
-              },
-              "dark": {
-                "purple": {
-                  "match": [
-                    "v-if",
-                    "v-else-if",
-                    "v-else"
-                  ],
-                  "before": {
-                    "contentText": "✨"
-                  }
-                },
-                "#B392F0": [
-                  "v-for"
-                ],
-                "#FFC83D": [
-                  "<template\\s+(\\#[^\\s\\/>=]+)",
-                  "v-bind",
-                  "v-once",
-                  "v-on",
-                  "(v-slot:[^>\\s\\/>]+)",
-                  "v-html",
-                  "v-text"
-                ],
-                "rgb(99, 102, 241)": {
-                  "match": [
-                    ":is"
-                  ]
-                },
-                "rgb(14, 165, 233)": [
-                  "(defineProps)[<\\(]",
-                  "defineOptions",
-                  "defineEmits",
-                  "defineExpose"
-                ]
-              }
-            },
-            "react": {
-              "light": {},
-              "dark": {}
-            }
+            "vue": {},
+            "react": {},
+            "svelte": {},
+            "astro": {},
+            "solid": {},
+            "markdown": {}
           },
           "description": "highlight vue | react | svelte | solid | astro | ... style"
         }

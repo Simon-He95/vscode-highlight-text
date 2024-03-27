@@ -9,6 +9,82 @@ export function isReg(o: any): o is RegExp {
   return typeof o === 'object' && o.constructor === RegExp
 }
 
+const defaultConfig = {
+  vue: {
+    light: {
+      'purple': {
+        match: [
+          'v-if',
+          'v-else-if',
+          'v-else',
+        ],
+        before: {
+          contentText: '✨',
+        },
+      },
+      '#B392F0': [
+        'v-for',
+      ],
+      '#FFC83D': [
+        '<template\\s+(\\#[^\\s\\/>=]+)',
+        'v-bind',
+        'v-once',
+        'v-on',
+        '(v-slot:[^>\\s\\/>]+)',
+        'v-html',
+        'v-text',
+      ],
+      'rgb(99, 102, 241)': [
+        ':is',
+      ],
+      'rgb(14, 165, 233)': [
+        '(defineProps)[<\\(]',
+        'defineOptions',
+        'defineEmits',
+        'defineExpose',
+      ],
+    },
+    dark: {
+      'purple': {
+        match: [
+          'v-if',
+          'v-else-if',
+          'v-else',
+        ],
+        before: {
+          contentText: '✨',
+        },
+      },
+      '#B392F0': [
+        'v-for',
+      ],
+      '#FFC83D': [
+        '<template\\s+(\\#[^\\s\\/>=]+)',
+        'v-bind',
+        'v-once',
+        'v-on',
+        '(v-slot:[^>\\s\\/>]+)',
+        'v-html',
+        'v-text',
+      ],
+      'rgb(99, 102, 241)': {
+        match: [
+          ':is',
+        ],
+      },
+      'rgb(14, 165, 233)': [
+        '(defineProps)[<\\(]',
+        'defineOptions',
+        'defineEmits',
+        'defineExpose',
+      ],
+    },
+  },
+  react: {
+    light: {},
+    dark: {},
+  },
+}
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
@@ -38,8 +114,7 @@ export async function activate(context: ExtensionContext) {
       case 'astro':
         lan = 'astro'
     }
-
-    const userConfigurationStyle = getConfiguration('vscode-highlight-text.rules')[lan]?.[isDark() ? 'dark' : 'light']
+    const userConfigurationStyle = getConfiguration('vscode-highlight-text.rules', defaultConfig)[lan]?.[isDark() ? 'dark' : 'light']
     if (!userConfigurationStyle)
       return
 
@@ -83,6 +158,7 @@ export async function activate(context: ExtensionContext) {
   disposes.push(addEventListener('text-change', updateVStyle))
   disposes.push(addEventListener('activeText-change', updateVStyle))
   disposes.push(addEventListener('config-change', updateVStyle))
+  disposes.push(addEventListener('theme-change', updateVStyle))
   context.subscriptions.push(...disposes)
 }
 
