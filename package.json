@@ -51,7 +51,13 @@
           "description": "highlight vue | react | svelte | solid | astro | ... style"
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "vscode-highlight-text.selectTemplate",
+        "title": "Select the vscode-highlight-text template"
+      }
+    ]
   },
   "scripts": {
     "dev": "pnpm build --watch",
@@ -72,6 +78,7 @@
     "bumpp": "^9.2.0",
     "eslint": "^8.54.0",
     "esno": "^0.16.3",
+    "lazy-js-utils": "^0.0.89",
     "pnpm": "^8.10.5",
     "rimraf": "^4.4.1",
     "tsup": "^6.7.0",

@@ -1,5 +1,7 @@
-import { addEventListener, createRange, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, setStyle } from '@vscode-use/utils'
+import { addEventListener, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import type { Disposable, ExtensionContext } from 'vscode'
+import { deepMerge } from 'lazy-js-utils'
+import templates from './template'
 
 export interface UserConfig {
   match: string[]
@@ -159,6 +161,21 @@ export async function activate(context: ExtensionContext) {
   disposes.push(addEventListener('activeText-change', updateVStyle))
   disposes.push(addEventListener('config-change', updateVStyle))
   disposes.push(addEventListener('theme-change', updateVStyle))
+  disposes.push(registerCommand('vscode-highlight-text.selectTemplate', () => {
+    const options = Object.keys(templates)
+    if (!options.length)
+      return
+    createSelect(options).then((select) => {
+      if (!select)
+        return
+      const templateConfig = (templates as any)[select]
+      const userConfig = getConfiguration('vscode-highlight-text.rules')
+      // 把用户的 config 和 模板的 config 合并
+      const mergeConfig = deepMerge(userConfig, templateConfig)
+      setConfiguration('vscode-highlight-text.rules', mergeConfig)
+      nextTick(updateVStyle)
+    })
+  }))
   context.subscriptions.push(...disposes)
 }
 
