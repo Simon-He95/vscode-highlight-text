@@ -92,6 +92,18 @@
         }
 ```
 
+## Feature
+- 你可以在同一个配置下作用于多个类型文件通过 `|` 分隔, 下面的例子就是 `react、typescript、javascript` 共同的配置
+
+```json
+{
+  "react|typescript|javascript": {
+    "light": {},
+    "dark": {}
+  }
+}
+```
+
 ## :coffee:
 
 [请我喝一杯咖啡](https://github.com/Simon-He95/sponsor)

@@ -92,6 +92,18 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
         }
 ```
 
+## Feature
+- You can apply the same configuration to multiple type files separated by `|`. The following example is a common configuration for `react, typescript, and javascript`
+
+```json
+{
+  "react|typescript|javascript": {
+    "light": {},
+    "dark": {}
+  }
+}
+```
+
 ## :coffee:
 
 [buy me a cup of coffee](https://github.com/Simon-He95/sponsor)

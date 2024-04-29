@@ -116,7 +116,8 @@ export async function activate(context: ExtensionContext) {
       case 'astro':
         lan = 'astro'
     }
-    const userConfigurationStyle = getConfiguration('vscode-highlight-text.rules', defaultConfig)[lan]?.[isDark() ? 'dark' : 'light']
+    // 支持 key 为 'a|b' 的形式
+    const userConfigurationStyle = getUserConfigurationStyle(lan)?.[isDark() ? 'dark' : 'light']
     if (!userConfigurationStyle)
       return
 
@@ -181,4 +182,11 @@ export async function activate(context: ExtensionContext) {
 
 export function deactivate() {
 
+}
+
+function getUserConfigurationStyle(lan: string) {
+  const config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
+  const k = Object.keys(config).find(key => key === lan || (key.includes('|') && key.split('|').includes(lan)))
+  if (k)
+    return config[k]
 }
