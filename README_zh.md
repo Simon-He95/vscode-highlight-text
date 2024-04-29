@@ -104,6 +104,10 @@
 }
 ```
 
+## Show your style
+
+- 你可以在[这里](https://github.com/Simon-He95/vscode-highlight-text/issues/5)去分享你觉得很炫酷的风格,也可以提 pr 作为内置的模板风格选择提供给更多人使用.
+
 ## :coffee:
 
 [请我喝一杯咖啡](https://github.com/Simon-He95/sponsor)

@@ -104,6 +104,10 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 }
 ```
 
+## Show your style
+
+- You can share the style you think is cool [here](https://github.com/Simon-He95/vscode-highlight-text/issues/5), or you can submit PR as a built-in template style selection Make it available to more people.
+
 ## :coffee:
 
 [buy me a cup of coffee](https://github.com/Simon-He95/sponsor)
