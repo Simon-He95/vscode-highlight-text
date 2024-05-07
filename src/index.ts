@@ -186,7 +186,7 @@ export function deactivate() {
 
 function getUserConfigurationStyle(lan: string) {
   const config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
-  const k = Object.keys(config).find(key => key === lan || (key.includes('|') && key.split('|').includes(lan)))
+  const k = Object.keys(config).findLast(key => key === lan || (key.includes('|') && key.split('|').includes(lan)))
   if (k)
     return config[k]
 }
