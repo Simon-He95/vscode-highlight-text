@@ -142,7 +142,7 @@ export async function activate(context: ExtensionContext) {
       }
       const style = createStyle(styleOption)
       if (Array.isArray(option) && option.length) {
-        const reg = new RegExp(option.join('|'), 'g')
+        const reg = new RegExp(option.join('|'), 'gm')
         for (const matcher of text.matchAll(reg)) {
           const start = matcher[1] ? matcher.index! + matcher[0].indexOf(matcher[1]) : matcher.index!
           const end = start + (matcher[1] ? matcher[1].length : matcher[0].length)
