@@ -93,7 +93,7 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 ```
 
 ## Feature
-- You can apply the same configuration to multiple type files separated by `|`. The following example is a common configuration for `react, typescript, and javascript`
+### 1. You can apply the same configuration to multiple type files separated by `|`. The following example is a common configuration for `react, typescript, and javascript`
 
 ```json
 {
@@ -103,6 +103,30 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
   }
 }
 ```
+
+### 2. You can set different styles for multiple match items in a regular rule
+
+  - Example 1:
+
+  ```md
+   "match": ["(function)\\s+([\\w]*)"], this regular match matches `match1: function` and `match2: functionName`
+   "colors": ["red", "yellow"], this colors can set match1 to red and match2 to yellow
+  ```
+   > Example 1 is just a convenient use of color. If you want more attributes, you can refer to Example 2.
+
+  - Example 2:
+
+  ```md
+   "match": ["(function)\\s+([\\w]*)"], this regular match matches `match1: function` and `match2: functionName`
+   "matchCss": [{
+     "color": "red",
+     "before": {
+       "contentText": "✨"
+     }
+   },{
+     "color": "yellow"
+   }]
+   ```
 
 ## Show your style
 
