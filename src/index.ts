@@ -1,6 +1,6 @@
-import { addEventListener, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
+import { addEventListener, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import type { Disposable, ExtensionContext } from 'vscode'
-import { deepMerge } from 'lazy-js-utils'
+import { deepMerge, isArray, isObject } from 'lazy-js-utils'
 import templates from './template'
 
 export interface UserConfig {
@@ -133,9 +133,9 @@ export async function activate(context: ExtensionContext) {
       return
     for (const color in userConfigurationStyle) {
       let option = userConfigurationStyle[color] as string[] | UserConfig
-      const ranges: any = []
 
-      let styleOption = { color, isWholeLine: false }
+      const ranges: any = []
+      let styleOption: any = { color, isWholeLine: false }
       if (!Array.isArray(option) && option.match) {
         styleOption = Object.assign({ color }, option, { after: option.after }, { before: option.before }) as any
         option = option.match
@@ -143,11 +143,60 @@ export async function activate(context: ExtensionContext) {
       const style = createStyle(styleOption)
       if (Array.isArray(option) && option.length) {
         const reg = new RegExp(option.join('|'), 'gm')
+        // 如果有 colors 字段
+        const colors = styleOption.colors
+        const matchCss = styleOption.matchCss
         for (const matcher of text.matchAll(reg)) {
-          const start = matcher[1] ? matcher.index! + matcher[0].indexOf(matcher[1]) : matcher.index!
-          const end = start + (matcher[1] ? matcher[1].length : matcher[0].length)
-          const range = createRange(getPosition(start), getPosition(end))
-          ranges.push(range)
+          if (isArray(matchCss)) {
+            for (let i = 0; i < matchCss.length; i++) {
+              const option = matchCss[i]
+              if (!option)
+                break
+              if (!isObject(option))
+                return message.error('matchCss 类型错误')
+              const style = createStyle(Object.assign({ color, isWholeLine: false }, option))
+              const matchText = matcher[i + 1]
+              if (matchText === undefined)
+                break
+              if (!matchText)
+                continue
+              const start = matcher.index! + matcher[0].indexOf(matchText)
+              const end = start + (matchText.length)
+              const range = createRange(getPosition(start), getPosition(end))
+              setStyle(style, range)
+              clearStyle[cacheKey].push(() => setStyle(style))
+            }
+          }
+          else if (isArray(colors)) {
+            for (let i = 0; i < colors.length; i++) {
+              const c = colors[i]
+              if (!c)
+                continue
+              const style = createStyle({ color: c, isWholeLine: false })
+              const matchText = matcher[i + 1]
+              if (matchText === undefined)
+                break
+              if (!matchText)
+                continue
+              const start = matcher.index! + matcher[0].indexOf(matchText)
+              const end = start + (matchText.length)
+              const range = createRange(getPosition(start), getPosition(end))
+              setStyle(style, range)
+              clearStyle[cacheKey].push(() => setStyle(style))
+            }
+          }
+          else if (!colors) {
+            const start = matcher[1] ? matcher.index! + matcher[0].indexOf(matcher[1]) : matcher.index!
+            const end = start + (matcher[1] ? matcher[1].length : matcher[0].length)
+            const range = createRange(getPosition(start), getPosition(end))
+            ranges.push(range)
+          }
+          else if (colors && !isArray(colors)) {
+            return message.error(`colors 字段类型错误，需要是 colorsArray`)
+          }
+          else if (matchCss && !isArray(matchCss)) {
+            return message.error(`matchCss 字段类型错误，需要是 styleArray`)
+          }
         }
         if (ranges.length)
           setStyle(style, ranges)

@@ -93,7 +93,8 @@
 ```
 
 ## Feature
-- 你可以在同一个配置下作用于多个类型文件通过 `|` 分隔, 下面的例子就是 `react、typescript、javascript` 共同的配置
+
+### 1. 你可以在同一个配置下作用于多个类型文件通过 `|` 分隔, 下面的例子就是 `react、typescript、javascript` 共同的配置
 
 ```json
 {
@@ -103,6 +104,30 @@
   }
 }
 ```
+
+### 2. 你可以在一个正则中，对多个 match 项设置不同的style
+
+ - 例子 1:
+
+  ```md
+  "match": ["(function)\\s+([\\w]*)"], 这个正则匹配到了 `match1: function` 和 `match2: functionName`
+  "colors": ["red", "yellow"], 这个 colors 可以将 match1 设置为 red，将 match2 设置为 yellow
+  ```
+  > 例子 1 只是对颜色的便捷使用，如果要更多属性可以参考例子 2
+
+ - 例子 2:
+
+ ```md
+  "match": ["(function)\\s+([\\w]*)"], 这个正则匹配到了 `match1: function` 和 `match2: functionName`
+  "matchCss": [{
+    "color": "red",
+    "before": {
+      "contentText": "✨"
+    }
+  },{
+    "color": "yellow"
+  }]
+  ```
 
 ## Show your style
 
