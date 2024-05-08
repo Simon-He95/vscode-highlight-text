@@ -186,8 +186,17 @@ export async function activate(context: ExtensionContext) {
             }
           }
           else if (!colors) {
-            const start = matcher[1] ? matcher.index! + matcher[0].indexOf(matcher[1]) : matcher.index!
-            const end = start + (matcher[1] ? matcher[1].length : matcher[0].length)
+            let matchText
+            // 忽略 undefined 的 match 项
+            for (let i = 1; i < matcher.length; i++) {
+              matchText = matcher[i]
+              if (matchText !== undefined)
+                break
+            }
+            if (!matchText)
+              continue
+            const start = matcher.index! + matcher[0].indexOf(matchText)
+            const end = start + matchText.length
             const range = createRange(getPosition(start), getPosition(end))
             ranges.push(range)
           }
