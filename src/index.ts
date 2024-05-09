@@ -188,11 +188,14 @@ export async function activate(context: ExtensionContext) {
           else if (!colors) {
             let matchText
             // 忽略 undefined 的 match 项
-            for (let i = 1; i < matcher.length; i++) {
-              matchText = matcher[i]
-              if (matchText !== undefined)
-                break
+            if (matcher.length > 1) {
+              for (let i = 1; i < matcher.length; i++) {
+                matchText = matcher[i]
+                if (matchText !== undefined)
+                  break
+              }
             }
+            else { matchText = matcher[0] }
             if (!matchText)
               continue
             const start = matcher.index! + matcher[0].indexOf(matchText)
