@@ -127,6 +127,9 @@ export async function activate(context: ExtensionContext) {
       cache.forEach(cb => cb())
       cache.length = 0
     }
+    else {
+      clearStyle[cacheKey] = []
+    }
     const text = getActiveText()
 
     if (!text)
@@ -212,8 +215,7 @@ export async function activate(context: ExtensionContext) {
         }
         if (ranges.length)
           setStyle(style, ranges)
-        if (!clearStyle[cacheKey])
-          clearStyle[cacheKey] = []
+
         clearStyle[cacheKey].push(() => setStyle(style))
       }
     }
