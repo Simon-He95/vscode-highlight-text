@@ -128,6 +128,14 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
    }]
    ```
 
+### 3. You can use `ignoreReg` to filter unwanted content
+  ```md
+   "match": ["(function)\\s+([\\w]*)"], this regular match matches `match1: function` and `match2: functionName`
+   "ignoreReg": [
+    "```([^`])+``` "// I don’t want the content of match to be between ``` and ```
+   ]
+   ```
+
 ## Show your style
 
 - You can share the style you think is cool [here](https://github.com/Simon-He95/vscode-highlight-text/issues/5), or you can submit PR as a built-in template style selection Make it available to more people.

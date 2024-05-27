@@ -130,7 +130,7 @@ export async function activate(context: ExtensionContext) {
     else {
       clearStyle[cacheKey] = []
     }
-    const text = getActiveText()
+    let text = getActiveText()!
 
     if (!text)
       return
@@ -149,6 +149,16 @@ export async function activate(context: ExtensionContext) {
         // 如果有 colors 字段
         const colors = styleOption.colors
         const matchCss = styleOption.matchCss
+        const ignoreReg = styleOption.ignoreReg
+        const resetText = text
+        if (ignoreReg?.length) {
+          for (const regStr of ignoreReg.filter(Boolean)) {
+            const reg = isArray(regStr)
+              ? new RegExp(regStr[0], regStr[1])
+              : new RegExp(regStr, 'g')
+            text = text.replace(reg, _ => ' '.repeat(_.length))
+          }
+        }
         for (const matcher of text.matchAll(reg)) {
           if (isArray(matchCss)) {
             for (let i = 0; i < matchCss.length; i++) {
@@ -213,6 +223,7 @@ export async function activate(context: ExtensionContext) {
             return message.error(`matchCss 字段类型错误，需要是 styleArray`)
           }
         }
+        text = resetText
         if (ranges.length)
           setStyle(style, ranges)
 

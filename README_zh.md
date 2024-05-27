@@ -129,6 +129,14 @@
   }]
   ```
 
+### 3. 你可以使用 `ignoreReg` 去过滤不需要的内容
+  ```md
+   "match": ["(function)\\s+([\\w]*)"], this regular match matches `match1: function` and `match2: functionName`
+   "ignoreReg": [
+    "```([^`])+```" // 我不希望 match 的内容是在 ``` 和 ``` 之间的
+   ]
+   ```
+
 ## Show your style
 
 - 你可以在[这里](https://github.com/Simon-He95/vscode-highlight-text/issues/5)去分享你觉得很炫酷的风格,也可以提 pr 作为内置的模板风格选择提供给更多人使用.
