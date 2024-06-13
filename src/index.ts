@@ -2,14 +2,7 @@ import { addEventListener, createRange, createSelect, createStyle, getActiveText
 import type { Disposable, ExtensionContext } from 'vscode'
 import { deepMerge, isArray, isObject } from 'lazy-js-utils'
 import templates from './template'
-
-export interface UserConfig {
-  match: string[]
-  [key: string]: any
-}
-export function isReg(o: any): o is RegExp {
-  return typeof o === 'object' && o.constructor === RegExp
-}
+import type { ClearStyle, UserConfig } from './type'
 
 const defaultConfig = {
   vue: {
@@ -87,10 +80,11 @@ const defaultConfig = {
     dark: {},
   },
 }
+const clearStyle: ClearStyle = {}
+
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
-  const clearStyle: Record<string, (() => void)[]> = {}
   const updateVStyle = () => {
     const currentFileUrl = getCurrentFileUrl(true)
     if (!currentFileUrl)
@@ -255,7 +249,9 @@ export async function activate(context: ExtensionContext) {
 }
 
 export function deactivate() {
-
+  Object.keys(clearStyle).forEach((key) => {
+    clearStyle[key].length = 0
+  })
 }
 
 function getUserConfigurationStyle(lan: string) {
