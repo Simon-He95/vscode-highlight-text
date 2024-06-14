@@ -1,8 +1,9 @@
 import { addEventListener, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import type { Disposable, ExtensionContext } from 'vscode'
-import { deepMerge, isArray, isObject } from 'lazy-js-utils'
+import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import templates from './template'
 import type { ClearStyle, UserConfig } from './type'
+import { safeMatchAll, safeReplace } from './utils'
 
 const defaultConfig = {
   vue: {
@@ -85,7 +86,7 @@ const clearStyle: ClearStyle = {}
 export async function activate(context: ExtensionContext) {
   const disposes: Disposable[] = []
 
-  const updateVStyle = () => {
+  const updateVStyle = debounce(() => {
     const currentFileUrl = getCurrentFileUrl(true)
     if (!currentFileUrl)
       return
@@ -150,10 +151,10 @@ export async function activate(context: ExtensionContext) {
             const reg = isArray(regStr)
               ? new RegExp(regStr[0], regStr[1])
               : new RegExp(regStr, 'g')
-            text = text.replace(reg, _ => ' '.repeat(_.length))
+            text = safeReplace(text, reg, (_: string) => ' '.repeat(_.length), 1000)
           }
         }
-        for (const matcher of text.matchAll(reg)) {
+        for (const matcher of safeMatchAll(text, reg)) {
           if (isArray(matchCss)) {
             for (let i = 0; i < matchCss.length; i++) {
               const option = matchCss[i]
@@ -224,10 +225,13 @@ export async function activate(context: ExtensionContext) {
         clearStyle[cacheKey].push(() => setStyle(style))
       }
     }
-  }
+  }, 100)
   updateVStyle()
   disposes.push(addEventListener('text-change', updateVStyle))
-  disposes.push(addEventListener('activeText-change', updateVStyle))
+  disposes.push(addEventListener('activeText-change', (e) => {
+    if (e)
+      updateVStyle()
+  }))
   disposes.push(addEventListener('config-change', updateVStyle))
   disposes.push(addEventListener('theme-change', updateVStyle))
   disposes.push(registerCommand('vscode-highlight-text.selectTemplate', () => {
