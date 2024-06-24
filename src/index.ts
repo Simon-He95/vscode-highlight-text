@@ -1,5 +1,4 @@
-import { addEventListener, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
-import type { Disposable, ExtensionContext } from 'vscode'
+import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import templates from './template'
 import type { ClearStyle, UserConfig } from './type'
@@ -82,10 +81,14 @@ const defaultConfig = {
   },
 }
 const clearStyle: ClearStyle = {}
+function getUserConfigurationStyle(lan: string) {
+  const config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
+  const k = Object.keys(config).findLast(key => key === lan || (key.includes('|') && key.split('|').includes(lan)))
+  if (k)
+    return config[k]
+}
 
-export async function activate(context: ExtensionContext) {
-  const disposes: Disposable[] = []
-
+export const { activate, deactivate } = createExtension(() => {
   const updateVStyle = debounce(() => {
     const currentFileUrl = getCurrentFileUrl(true)
     if (!currentFileUrl)
@@ -130,7 +133,7 @@ export async function activate(context: ExtensionContext) {
     if (!text)
       return
     for (const color in userConfigurationStyle) {
-      let option = userConfigurationStyle[color] as string[] | UserConfig
+      let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
 
       const ranges: any = []
       let styleOption: any = { color, isWholeLine: false }
@@ -140,127 +143,127 @@ export async function activate(context: ExtensionContext) {
       }
       const style = createStyle(styleOption)
       if (Array.isArray(option) && option.length) {
-        const reg = new RegExp(option.join('|'), 'gm')
-        // 如果有 colors 字段
-        const colors = styleOption.colors
-        const matchCss = styleOption.matchCss
-        const ignoreReg = styleOption.ignoreReg
-        const resetText = text
-        if (ignoreReg?.length) {
-          for (const regStr of ignoreReg.filter(Boolean)) {
-            const reg = isArray(regStr)
-              ? new RegExp(regStr[0], regStr[1])
-              : new RegExp(regStr, 'g')
-            text = safeReplace(text, reg, (_: string) => ' '.repeat(_.length), 1000)
-          }
-        }
-        for (const matcher of safeMatchAll(text, reg)) {
-          if (isArray(matchCss)) {
-            for (let i = 0; i < matchCss.length; i++) {
-              const option = matchCss[i]
-              if (!option)
-                break
-              if (!isObject(option))
-                return message.error('matchCss 类型错误')
-              const style = createStyle(Object.assign({ color, isWholeLine: false }, option))
-              const matchText = matcher[i + 1]
-              if (matchText === undefined)
-                break
-              if (!matchText)
-                continue
-              const start = matcher.index! + matcher[0].indexOf(matchText)
-              const end = start + (matchText.length)
-              const range = createRange(getPosition(start), getPosition(end))
-              setStyle(style, range)
-              clearStyle[cacheKey].push(() => setStyle(style))
+        option.forEach((o) => {
+          let reg
+          if (isArray(o))
+            reg = new RegExp(o[0], o[1] || 'gm')
+          else
+            reg = new RegExp(o, 'gm')
+
+          // 如果有 colors 字段
+          const colors = styleOption.colors
+          const matchCss = styleOption.matchCss
+          const ignoreReg = styleOption.ignoreReg
+          const resetText = text
+          if (ignoreReg?.length) {
+            for (const regStr of ignoreReg.filter(Boolean)) {
+              const reg = isArray(regStr)
+                ? new RegExp(regStr[0], regStr[1])
+                : new RegExp(regStr, 'g')
+              text = safeReplace(text, reg, (_: string) => ' '.repeat(_.length), 1000)
             }
           }
-          else if (isArray(colors)) {
-            for (let i = 0; i < colors.length; i++) {
-              const c = colors[i]
-              if (!c)
-                continue
-              const style = createStyle({ color: c, isWholeLine: false })
-              const matchText = matcher[i + 1]
-              if (matchText === undefined)
-                break
-              if (!matchText)
-                continue
-              const start = matcher.index! + matcher[0].indexOf(matchText)
-              const end = start + (matchText.length)
-              const range = createRange(getPosition(start), getPosition(end))
-              setStyle(style, range)
-              clearStyle[cacheKey].push(() => setStyle(style))
-            }
-          }
-          else if (!colors) {
-            let matchText
-            // 忽略 undefined 的 match 项
-            if (matcher.length > 1) {
-              for (let i = 1; i < matcher.length; i++) {
-                matchText = matcher[i]
-                if (matchText !== undefined)
+          for (const matcher of safeMatchAll(text, reg)) {
+            if (isArray(matchCss)) {
+              for (let i = 0; i < matchCss.length; i++) {
+                const option = matchCss[i]
+                if (!option)
                   break
+                if (!isObject(option))
+                  return message.error('matchCss 类型错误')
+                const style = createStyle(Object.assign({ color, isWholeLine: false }, option))
+                const matchText = matcher[i + 1]
+                if (matchText === undefined)
+                  break
+                if (!matchText)
+                  continue
+                const start = matcher.index! + matcher[0].indexOf(matchText)
+                const end = start + (matchText.length)
+                const range = createRange(getPosition(start), getPosition(end))
+                setStyle(style, range)
+                clearStyle[cacheKey].push(() => setStyle(style))
               }
             }
-            else { matchText = matcher[0] }
-            if (!matchText)
-              continue
-            const start = matcher.index! + matcher[0].indexOf(matchText)
-            const end = start + matchText.length
-            const range = createRange(getPosition(start), getPosition(end))
-            ranges.push(range)
+            else if (isArray(colors)) {
+              for (let i = 0; i < colors.length; i++) {
+                const c = colors[i]
+                if (!c)
+                  continue
+                const style = createStyle({ color: c, isWholeLine: false })
+                const matchText = matcher[i + 1]
+                if (matchText === undefined)
+                  break
+                if (!matchText)
+                  continue
+                const start = matcher.index! + matcher[0].indexOf(matchText)
+                const end = start + (matchText.length)
+                const range = createRange(getPosition(start), getPosition(end))
+                setStyle(style, range)
+                clearStyle[cacheKey].push(() => setStyle(style))
+              }
+            }
+            else if (!colors) {
+              let matchText
+              // 忽略 undefined 的 match 项
+              if (matcher.length > 1) {
+                for (let i = 1; i < matcher.length; i++) {
+                  matchText = matcher[i]
+                  if (matchText !== undefined)
+                    break
+                }
+              }
+              else { matchText = matcher[0] }
+              if (!matchText)
+                continue
+              const start = matcher.index! + matcher[0].indexOf(matchText)
+              const end = start + matchText.length
+              const range = createRange(getPosition(start), getPosition(end))
+              ranges.push(range)
+            }
+            else if (colors && !isArray(colors)) {
+              return message.error(`colors 字段类型错误，需要是 colorsArray`)
+            }
+            else if (matchCss && !isArray(matchCss)) {
+              return message.error(`matchCss 字段类型错误，需要是 styleArray`)
+            }
           }
-          else if (colors && !isArray(colors)) {
-            return message.error(`colors 字段类型错误，需要是 colorsArray`)
-          }
-          else if (matchCss && !isArray(matchCss)) {
-            return message.error(`matchCss 字段类型错误，需要是 styleArray`)
-          }
-        }
-        text = resetText
-        if (ranges.length)
-          setStyle(style, ranges)
+          text = resetText
+          if (ranges.length)
+            setStyle(style, ranges)
 
-        clearStyle[cacheKey].push(() => setStyle(style))
+          clearStyle[cacheKey].push(() => setStyle(style))
+        })
       }
     }
   }, 100)
   updateVStyle()
-  disposes.push(addEventListener('text-change', updateVStyle))
-  disposes.push(addEventListener('activeText-change', (e) => {
-    if (e)
-      updateVStyle()
-  }))
-  disposes.push(addEventListener('config-change', updateVStyle))
-  disposes.push(addEventListener('theme-change', updateVStyle))
-  disposes.push(registerCommand('vscode-highlight-text.selectTemplate', () => {
-    const options = Object.keys(templates)
-    if (!options.length)
-      return
-    createSelect(options).then((select) => {
-      if (!select)
-        return
-      const templateConfig = (templates as any)[select]
-      const userConfig = getConfiguration('vscode-highlight-text.rules')
-      // 把用户的 config 和 模板的 config 合并
-      const mergeConfig = deepMerge(userConfig, templateConfig)
-      setConfiguration('vscode-highlight-text.rules', mergeConfig)
-      nextTick(updateVStyle)
-    })
-  }))
-  context.subscriptions.push(...disposes)
-}
 
-export function deactivate() {
+  return [
+    addEventListener('text-change', updateVStyle),
+    addEventListener('activeText-change', (e) => {
+      if (e)
+        updateVStyle()
+    }),
+    addEventListener('config-change', updateVStyle),
+    addEventListener('theme-change', updateVStyle),
+    registerCommand('vscode-highlight-text.selectTemplate', () => {
+      const options = Object.keys(templates)
+      if (!options.length)
+        return
+      createSelect(options).then((select: any) => {
+        if (!select)
+          return
+        const templateConfig = (templates as any)[select]
+        const userConfig = getConfiguration('vscode-highlight-text.rules')
+        // 把用户的 config 和 模板的 config 合并
+        const mergeConfig = deepMerge(userConfig, templateConfig)
+        setConfiguration('vscode-highlight-text.rules', mergeConfig)
+        nextTick(updateVStyle)
+      })
+    }),
+  ]
+}, () => {
   Object.keys(clearStyle).forEach((key) => {
     clearStyle[key].length = 0
   })
-}
-
-function getUserConfigurationStyle(lan: string) {
-  const config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
-  const k = Object.keys(config).findLast(key => key === lan || (key.includes('|') && key.split('|').includes(lan)))
-  if (k)
-    return config[k]
-}
+})

@@ -136,6 +136,11 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
    ]
    ```
 
+### 4. Support RegExp flags passing
+  ```md
+   "red": ["[0-9]+","gm"]
+   ```
+
 ## Show your style
 
 - You can share the style you think is cool [here](https://github.com/Simon-He95/vscode-highlight-text/issues/5), or you can submit PR as a built-in template style selection Make it available to more people.

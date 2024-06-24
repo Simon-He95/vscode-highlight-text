@@ -1,5 +1,5 @@
 export interface UserConfig {
-  match: string[]
+  match: (string | [string, string])[]
   [key: string]: any
 }
 
