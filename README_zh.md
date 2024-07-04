@@ -89,6 +89,15 @@
             }
           },
           "description": "highlight vue | react | svelte | solid | astro | ... style"
+        },
+        // 为了一些场景下的优化可以选择跳过某些目录和文件的扫描
+        "vscode-highlight-text.exclude": {
+          "type": "array",
+          "default": [
+            "**/dist/**",
+            "**/node_modules/**"
+          ],
+          "description": "The directory you want to be skipped"
         }
 ```
 

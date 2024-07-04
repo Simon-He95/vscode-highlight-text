@@ -1,5 +1,6 @@
 import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
+import { createFilter } from '@rollup/pluginutils'
 import templates from './template'
 import type { ClearStyle, UserConfig } from './type'
 import { safeMatchAll, safeReplace } from './utils'
@@ -90,13 +91,16 @@ function getUserConfigurationStyle(lan: string) {
 
 export const { activate, deactivate } = createExtension(() => {
   const updateVStyle = debounce(() => {
+    const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
+    const filter = createFilter(defaultExclude)
     const currentFileUrl = getCurrentFileUrl(true)
     if (!currentFileUrl)
+      return
+    if (filter(currentFileUrl.path))
       return
     let lan = getActiveTextEditorLanguageId()
     if (!lan)
       return
-
     switch (lan) {
       case 'vue':
         lan = 'vue'

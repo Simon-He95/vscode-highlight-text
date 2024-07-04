@@ -89,6 +89,15 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
             }
           },
           "description": "highlight vue | react | svelte | solid | astro | ... style"
+        },
+        // For optimization in some scenarios, you can choose to skip scanning certain directories and files.
+        "vscode-highlight-text.exclude": {
+          "type": "array",
+          "default": [
+            "**/dist/**",
+            "**/node_modules/**"
+          ],
+          "description": "The directory you want to be skipped"
         }
 ```
 

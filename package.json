@@ -49,6 +49,14 @@
             "markdown": {}
           },
           "description": "highlight vue | react | svelte | solid | astro | ... style"
+        },
+        "vscode-highlight-text.exclude": {
+          "type": "array",
+          "default": [
+            "**/dist/**",
+            "**/node_modules/**"
+          ],
+          "description": "The directory you want to be skipped"
         }
       }
     },
@@ -72,6 +80,7 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^2.9.0",
+    "@rollup/pluginutils": "^5.1.0",
     "@types/node": "^18.18.12",
     "@types/vscode": "^1.84.2",
     "@vscode-use/utils": "^0.1.0",
