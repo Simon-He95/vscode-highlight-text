@@ -117,7 +117,7 @@ export const { activate, deactivate } = createExtension(() => {
     return lan
   }
 
-  const updateVStyle = debounce(() => {
+  const updateVStyle = debounce((isClear: boolean) => {
     const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
     const filter = createFilter(defaultExclude)
     const currentFileUrl = getCurrentFileUrl(true)
@@ -144,7 +144,7 @@ export const { activate, deactivate } = createExtension(() => {
       const range = createRange(getPosition(start), getPosition(end))
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
-      if (clearStyle[cacheKey].has(positionKey)) {
+      if (!isClear && clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
         clearStyle[cacheKey].delete(positionKey)
         stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
@@ -166,11 +166,13 @@ export const { activate, deactivate } = createExtension(() => {
     for (const color in userConfigurationStyle) {
       let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
       let styleOption: any = { color, isWholeLine: false }
+      const ranges: any = []
       if (!Array.isArray(option) && option.match) {
         styleOption = Object.assign({ color }, option, { after: option.after }, { before: option.before }) as any
         option = option.match
       }
       const style = createStyle(styleOption)
+      const tempKeys: string[] = []
       if (Array.isArray(option) && option.length) {
         option.forEach((o) => {
           const reg = isArray(o)
@@ -181,7 +183,6 @@ export const { activate, deactivate } = createExtension(() => {
           const colors = styleOption.colors
           const matchCss = styleOption.matchCss
           const ignoreReg = styleOption.ignoreReg
-
           if (ignoreReg?.length) {
             for (const regStr of ignoreReg.filter(Boolean)) {
               const reg = isArray(regStr)
@@ -235,7 +236,13 @@ export const { activate, deactivate } = createExtension(() => {
               else { matchText = matcher[0] }
               if (!matchText)
                 continue
-              run(matchText, matcher, style)
+              // 这里不能一个个设置，之前的样式会丢失
+              const start = matcher.index! + matcher[0].indexOf(matchText)
+              const end = start + matchText.length
+              const range = createRange(getPosition(start), getPosition(end))
+              ranges.push(range)
+              const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
+              tempKeys.push(positionKey)
             }
             else if (colors && !isArray(colors)) {
               return message.error(`colors 字段类型错误，需要是 colorsArray`)
@@ -246,7 +253,20 @@ export const { activate, deactivate } = createExtension(() => {
           }
         })
       }
+      const key = tempKeys.join('-')
+      if (!key)
+        continue
+      if (!isClear && clearStyle[cacheKey].has(key)) {
+        const clear = clearStyle[cacheKey].get(key)!
+        clearStyle[cacheKey].delete(key)
+        stacks.push(() => clearStyle[cacheKey].set(key, clear))
+      }
+      else {
+        const clear = setStyle(style, ranges)!
+        stacks.push(() => clearStyle[cacheKey].set(key, clear))
+      }
     }
+
     // 将剩余 clearStyle 中 cache 清楚，再增加 stacks 中需要新增的
     clearStyle[cacheKey].forEach((clear) => {
       clear()
@@ -261,7 +281,7 @@ export const { activate, deactivate } = createExtension(() => {
     addEventListener('text-change', updateVStyle),
     addEventListener('activeText-change', (e) => {
       if (e)
-        updateVStyle()
+        updateVStyle(true)
     }),
     addEventListener('config-change', updateVStyle),
     addEventListener('theme-change', updateVStyle),
