@@ -3,4 +3,4 @@ export interface UserConfig {
   [key: string]: any
 }
 
-export type ClearStyle = Record<string, (() => void)[]>
+export type ClearStyle = Record<string, Map<string, () => void>>
