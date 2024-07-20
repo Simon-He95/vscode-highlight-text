@@ -83,11 +83,23 @@ const defaultConfig = {
   },
 }
 const clearStyle: ClearStyle = {}
-function getUserConfigurationStyle(lan: string) {
+function getUserConfigurationStyle(lan: string, mode: 'dark' | 'light') {
   const config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
-  const k = Object.keys(config).findLast(key => key === lan || (key.includes('|') && key.split('|').includes(lan)))
-  if (k)
-    return config[k]
+  const keys = Object.keys(config).filter(key => isMatch(key, lan))
+  const result = keys.reduceRight((r, k) => {
+    const value = config[k][mode]
+    r.push(value)
+    return r
+  }, [] as any).filter(Boolean)
+  return result
+}
+
+function isMatch(a: string, b: string) {
+  if (a === b)
+    return true
+  const aMap = a.split('|')
+  const bMap = b.split('|')
+  return aMap.some(i => bMap.includes(i)) || bMap.some(i => aMap.includes(i))
 }
 
 export const { activate, deactivate } = createExtension(() => {
@@ -99,20 +111,22 @@ export const { activate, deactivate } = createExtension(() => {
 
     switch (lan) {
       case 'vue':
-        lan = 'vue'
+        lan = /lang=['"]tsx['"]/.test(getActiveText()!) ? 'vuetsx|vue' : 'vue'
         break
       case 'javascriptreact':
       case 'typescriptreact':
-        lan = 'react'
+        lan = 'react|javascriptreact|typescriptreact'
         break
       case 'svelte':
-        lan = 'svelte'
-        break
       case 'solid':
-        lan = 'solid'
-        break
       case 'astro':
-        lan = 'astro'
+        break
+      case 'plaintext':
+        lan = 'txt|plaintext'
+        break
+      case 'markdown':
+        lan = 'md|markdown'
+        break
     }
     return lan
   }
@@ -131,8 +145,8 @@ export const { activate, deactivate } = createExtension(() => {
       return
 
     // 支持 key 为 'a|b' 的形式
-    const userConfigurationStyle = getUserConfigurationStyle(lan)?.[isDark() ? 'dark' : 'light']
-    if (!userConfigurationStyle)
+    const userConfigurationStyles = getUserConfigurationStyle(lan, isDark() ? 'dark' : 'light')
+    if (!userConfigurationStyles.length)
       return
 
     const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
@@ -162,108 +176,109 @@ export const { activate, deactivate } = createExtension(() => {
 
     if (!text)
       return
+    for (const userConfigurationStyle of userConfigurationStyles) {
+      for (const color in userConfigurationStyle) {
+        let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
+        let styleOption: any = { color, isWholeLine: false }
+        const ranges: any = []
+        if (!Array.isArray(option) && option.match) {
+          styleOption = Object.assign({ color }, option, { after: option.after }, { before: option.before }) as any
+          option = option.match
+        }
+        const style = createStyle(styleOption)
+        const tempKeys: string[] = []
+        if (Array.isArray(option) && option.length) {
+          option.forEach((o) => {
+            const reg = isArray(o)
+              ? new RegExp(o[0], o[1] || 'gm')
+              : new RegExp(o, 'gm')
 
-    for (const color in userConfigurationStyle) {
-      let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
-      let styleOption: any = { color, isWholeLine: false }
-      const ranges: any = []
-      if (!Array.isArray(option) && option.match) {
-        styleOption = Object.assign({ color }, option, { after: option.after }, { before: option.before }) as any
-        option = option.match
-      }
-      const style = createStyle(styleOption)
-      const tempKeys: string[] = []
-      if (Array.isArray(option) && option.length) {
-        option.forEach((o) => {
-          const reg = isArray(o)
-            ? new RegExp(o[0], o[1] || 'gm')
-            : new RegExp(o, 'gm')
-
-          // 如果有 colors 字段
-          const colors = styleOption.colors
-          const matchCss = styleOption.matchCss
-          const ignoreReg = styleOption.ignoreReg
-          if (ignoreReg?.length) {
-            for (const regStr of ignoreReg.filter(Boolean)) {
-              const reg = isArray(regStr)
-                ? new RegExp(regStr[0], regStr[1])
-                : new RegExp(regStr, 'g')
-              text = safeReplace(text, reg, (_: string) => ' '.repeat(_.length), 1000)
-            }
-          }
-          for (const matcher of safeMatchAll(text, reg)) {
-            if (isArray(matchCss)) {
-              for (let i = 0; i < matchCss.length; i++) {
-                const option = matchCss[i]
-                if (!option)
-                  break
-                if (!isObject(option))
-                  return message.error('matchCss 类型错误')
-                const matchText = matcher[i + 1]
-                if (matchText === undefined)
-                  break
-                if (!matchText)
-                  continue
-                const style = createStyle(Object.assign({ color, isWholeLine: false }, option))
-                run(matchText, matcher, style)
+            // 如果有 colors 字段
+            const colors = styleOption.colors
+            const matchCss = styleOption.matchCss
+            const ignoreReg = styleOption.ignoreReg
+            if (ignoreReg?.length) {
+              for (const regStr of ignoreReg.filter(Boolean)) {
+                const reg = isArray(regStr)
+                  ? new RegExp(regStr[0], regStr[1])
+                  : new RegExp(regStr, 'g')
+                text = safeReplace(text, reg, (_: string) => ' '.repeat(_.length), 1000)
               }
             }
-            else if (isArray(colors)) {
-              for (let i = 0; i < colors.length; i++) {
-                const c = colors[i]
-                if (!c)
-                  continue
-                const matchText = matcher[i + 1]
-                if (matchText === undefined)
-                  break
-                if (!matchText)
-                  continue
-
-                const style = createStyle({ color: c, isWholeLine: false })
-                run(matchText, matcher, style)
-              }
-            }
-            else if (!colors) {
-              let matchText
-              // 忽略 undefined 的 match 项
-              if (matcher.length > 1) {
-                for (let i = 1; i < matcher.length; i++) {
-                  matchText = matcher[i]
-                  if (matchText !== undefined)
+            for (const matcher of safeMatchAll(text, reg)) {
+              if (isArray(matchCss)) {
+                for (let i = 0; i < matchCss.length; i++) {
+                  const option = matchCss[i]
+                  if (!option)
                     break
+                  if (!isObject(option))
+                    return message.error('matchCss 类型错误')
+                  const matchText = matcher[i + 1]
+                  if (matchText === undefined)
+                    break
+                  if (!matchText)
+                    continue
+                  const style = createStyle(Object.assign({ color, isWholeLine: false }, option))
+                  run(matchText, matcher, style)
                 }
               }
-              else { matchText = matcher[0] }
-              if (!matchText)
-                continue
-              // 这里不能一个个设置，之前的样式会丢失
-              const start = matcher.index! + matcher[0].indexOf(matchText)
-              const end = start + matchText.length
-              const range = createRange(getPosition(start), getPosition(end))
-              ranges.push(range)
-              const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
-              tempKeys.push(positionKey)
+              else if (isArray(colors)) {
+                for (let i = 0; i < colors.length; i++) {
+                  const c = colors[i]
+                  if (!c)
+                    continue
+                  const matchText = matcher[i + 1]
+                  if (matchText === undefined)
+                    break
+                  if (!matchText)
+                    continue
+
+                  const style = createStyle({ color: c, isWholeLine: false })
+                  run(matchText, matcher, style)
+                }
+              }
+              else if (!colors) {
+                let matchText
+                // 忽略 undefined 的 match 项
+                if (matcher.length > 1) {
+                  for (let i = 1; i < matcher.length; i++) {
+                    matchText = matcher[i]
+                    if (matchText !== undefined)
+                      break
+                  }
+                }
+                else { matchText = matcher[0] }
+                if (!matchText)
+                  continue
+                // 这里不能一个个设置，之前的样式会丢失
+                const start = matcher.index! + matcher[0].indexOf(matchText)
+                const end = start + matchText.length
+                const range = createRange(getPosition(start), getPosition(end))
+                ranges.push(range)
+                const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
+                tempKeys.push(positionKey)
+              }
+              else if (colors && !isArray(colors)) {
+                return message.error(`colors 字段类型错误，需要是 colorsArray`)
+              }
+              else if (matchCss && !isArray(matchCss)) {
+                return message.error(`matchCss 字段类型错误，需要是 styleArray`)
+              }
             }
-            else if (colors && !isArray(colors)) {
-              return message.error(`colors 字段类型错误，需要是 colorsArray`)
-            }
-            else if (matchCss && !isArray(matchCss)) {
-              return message.error(`matchCss 字段类型错误，需要是 styleArray`)
-            }
-          }
-        })
-      }
-      const key = tempKeys.join('-')
-      if (!key)
-        continue
-      if (!isClear && clearStyle[cacheKey].has(key)) {
-        const clear = clearStyle[cacheKey].get(key)!
-        clearStyle[cacheKey].delete(key)
-        stacks.push(() => clearStyle[cacheKey].set(key, clear))
-      }
-      else {
-        const clear = setStyle(style, ranges)!
-        stacks.push(() => clearStyle[cacheKey].set(key, clear))
+          })
+        }
+        const key = tempKeys.join('-')
+        if (!key)
+          continue
+        if (!isClear && clearStyle[cacheKey].has(key)) {
+          const clear = clearStyle[cacheKey].get(key)!
+          clearStyle[cacheKey].delete(key)
+          stacks.push(() => clearStyle[cacheKey].set(key, clear))
+        }
+        else {
+          const clear = setStyle(style, ranges)!
+          stacks.push(() => clearStyle[cacheKey].set(key, clear))
+        }
       }
     }
 
