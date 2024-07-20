@@ -8,8 +8,10 @@
 ![demo](/assets/demo.jpg)
 
 ## Configuration
+> ⚠️ 请注意下面表示的是配置的类型, 如何配置可以参考 [shared rules](https://github.com/Simon-He95/vscode-highlight-text/issues/5)
+
 ```typescript
-  // 自定义设置高亮样式
+  // 自定义设置高亮样式, 请注意下面表示的是配置的类型, 如何配置可以参考这个链接
         "vscode-highlight-text.rules": {
           "type": "object",
           "default": {
