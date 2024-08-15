@@ -3,7 +3,7 @@
   "name": "vscode-highlight-text",
   "displayName": "vscode-highlight-text",
   "version": "0.0.26",
-  "packageManager": "pnpm@8.10.5",
+  "packageManager": "pnpm@8.15.9",
   "description": "vscode-highlight-text",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
@@ -28,7 +28,7 @@
     "dist"
   ],
   "engines": {
-    "vscode": "^1.84.2"
+    "vscode": "^1.92.0"
   },
   "activationEvents": [
     "onStartupFinished"
@@ -79,20 +79,19 @@
     "release": "bumpp && pnpm run publish"
   },
   "devDependencies": {
-    "@antfu/eslint-config": "^2.9.0",
+    "@antfu/eslint-config": "^2.25.1",
     "@rollup/pluginutils": "^5.1.0",
-    "@types/node": "^18.18.12",
-    "@types/vscode": "^1.84.2",
-    "@vscode-use/utils": "^0.1.0",
-    "bumpp": "^9.2.0",
-    "eslint": "^8.54.0",
+    "@types/node": "^18.19.44",
+    "@types/vscode": "^1.92.0",
+    "@vscode-use/utils": "^0.1.18",
+    "bumpp": "^9.5.1",
+    "eslint": "^8.57.0",
     "esno": "^0.16.3",
-    "lazy-js-utils": "^0.0.89",
-    "pnpm": "^8.10.5",
+    "lazy-js-utils": "^0.0.99",
+    "pnpm": "^8.15.9",
     "rimraf": "^4.4.1",
     "tsup": "^6.7.0",
-    "typescript": "^5.3.2",
-    "vite": "^4.5.0",
+    "typescript": "^5.5.4",
     "vitest": "^0.29.8",
     "vsce": "^2.15.0"
   }

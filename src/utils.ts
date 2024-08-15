@@ -1,3 +1,6 @@
+import { createLog } from '@vscode-use/utils'
+
+const logger = createLog('vscode-highlight-text')
 export function isReg(o: any): o is RegExp {
   return typeof o === 'object' && o.constructor === RegExp
 }
@@ -24,7 +27,7 @@ export function safeMatchAll(text: string, regex: RegExp, maxIterations = 1000) 
   while ((match = regex.exec(text)) !== null) {
     iterations++
     if (iterations > maxIterations) {
-      console.warn(`Infinite loop detected in regular expression with ${regex}`)
+      logger.warn(`Infinite loop detected in regular expression with ${regex}`)
       break
     }
 

@@ -10,97 +10,173 @@
 ## Configuration
 > ⚠️ 请注意下面表示的是配置的类型, 如何配置可以参考 [shared rules](https://github.com/Simon-He95/vscode-highlight-text/issues/5)
 
-```typescript
-  // 自定义设置高亮样式, 请注意下面表示的是配置的类型, 如何配置可以参考这个链接
-        "vscode-highlight-text.rules": {
-          "type": "object",
-          "default": {
-            "vue": {
-              "light": {
-                "purple": {
-                  "match": [
-                    "v-if",
-                    "v-else-if",
-                    "v-else"
-                  ],
-                  "before": {
-                    "contentText": "✨"
-                  }
-                },
-                "#B392F0": [
-                  "v-for"
-                ],
-                "#FFC83D": [
-                  "<template\\s+(\\#[^\\s\\/>=]+)",
-                  "v-bind",
-                  "v-once",
-                  "v-on",
-                  "(v-slot:[^>\\s\\/>]+)",
-                  "v-html",
-                  "v-text"
-                ],
-                "rgb(99, 102, 241)": [
-                  ":is"
-                ],
-                "rgb(14, 165, 233)": [
-                  "(defineProps)[<\\(]",
-                  "defineOptions",
-                  "defineEmits",
-                  "defineExpose"
-                ]
-              },
-              "dark": {
-                "purple": {
-                  "match": [
-                    "v-if",
-                    "v-else-if",
-                    "v-else"
-                  ],
-                  "before": {
-                    "contentText": "✨"
-                  }
-                },
-                "#B392F0": [
-                  "v-for"
-                ],
-                "#FFC83D": [
-                  "<template\\s+(\\#[^\\s\\/>=]+)",
-                  "v-bind",
-                  "v-once",
-                  "v-on",
-                  "(v-slot:[^>\\s\\/>]+)",
-                  "v-html",
-                  "v-text"
-                ],
-                "rgb(99, 102, 241)": {
-                  "match": [
-                    ":is"
-                  ]
-                },
-                "rgb(14, 165, 233)": [
-                  "(defineProps)[<\\(]",
-                  "defineOptions",
-                  "defineEmits",
-                  "defineExpose"
-                ]
-              }
-            },
-            "react": {
-              "light": {},
-              "dark": {}
-            }
-          },
-          "description": "highlight vue | react | svelte | solid | astro | ... style"
-        },
-        // 为了一些场景下的优化可以选择跳过某些目录和文件的扫描
-        "vscode-highlight-text.exclude": {
-          "type": "array",
-          "default": [
-            "**/dist/**",
-            "**/node_modules/**"
+```json
+// 自定义设置高亮样式, 请注意下面表示的是配置的类型, 如何配置可以参考这个链接
+{
+  "vscode-highlight-text.rules": {
+    "vue|react|typescript": {
+      "light": {
+        "purple": {
+          "match": [
+            "v-if",
+            "v-else-if",
+            "v-else"
           ],
-          "description": "The directory you want to be skipped"
+          "before": {
+            "contentText": "✨"
+          }
+        },
+        "#B392F0": [
+          "v-for"
+        ],
+        "#FFC83D": [
+          "<template\\s+(\\#[^\\s\\/>=]+)",
+          "\\s+(v-bind)",
+          "\\s+(v-once)",
+          "\\s+(v-on)",
+          "\\s+(v-slot:[^>\\s\\/>]+)",
+          "\\s+(v-html)",
+          "\\s+(v-text)"
+        ],
+        "rgb(99, 102, 241)": [
+          ":is"
+        ],
+        "rgb(110,231,183)": [
+          "(defineProps)[<\\(]",
+          "(defineOptions)[<\\(]",
+          "(defineEmits)[<\\(]",
+          "(defineExpose)[<\\(]"
+        ]
+      },
+      "dark": {
+        "#fae88e": {
+          "match": [
+            "^\\s*(?:export)?\\s*(type)\\s+",
+            "^\\s*(?:export)?\\s*(interface)\\s+"
+          ]
+        },
+        "#d798da": {
+          "match": [
+            "(?:=|^)\\s*(function) +(\\w*)"
+          ],
+          "colors": [
+            "#d798da",
+            "#c7fff9"
+          ]
+        },
+        "#d9ceff": {
+          "match": [
+            [
+              "^\\s*import\\s.*\\sfrom (['\"][^\\.~'\"][^\"']+['\"])",
+              "gm"
+            ]
+          ]
+        },
+        "#c7fff9": {
+          "match": [
+            "^\\s*import\\s.*\\sfrom (['\"][\\.~\/][^\"']+['\"])"
+          ]
+        },
+        "#cfe9c9": {
+          "match": [
+            "^\\s*import\\s+(['\"][^\"']+['\"])"
+          ]
+        },
+        "purple": {
+          "match": [
+            "\\s(v-else-if)=",
+            "\\s(v-if)=",
+            "\\s(v-else)\\s"
+          ],
+          "before": {
+            "contentText": "✨"
+          }
+        },
+        "#B392F0": {
+          "match": [
+            "\\s+(v-for)="
+          ]
+        },
+        "#FFC83D": [
+          "<template\\s+(\\#[^\\s\\/>=]+)",
+          "\\s+(v-bind)",
+          "\\s+(v-once)",
+          "\\s+(v-on)",
+          "(v-slot:[^>\\s\\/>]+)",
+          "\\s+(v-html)",
+          "\\s+(v-text)"
+        ],
+        "rgb(99, 102, 241)": {
+          "match": [
+            ":is"
+          ],
+          "ignoreReg": [
+            "`[^`]*`"
+          ]
+        },
+        "#8589cf": [
+          "(defineProps)[<\\(]",
+          "(defineOptions)[<\\(]",
+          "(defineEmits)[<\\(]",
+          "(defineExpose)[<\\(]"
+        ],
+        "#174e3a": [
+          "<(template)[^>]*>",
+          "<\/(template)>"
+        ],
+        "#4d4c87": [
+          "<(script)[^>]*>",
+          "<\/(script)>"
+        ],
+        "#724485": [
+          "<(style)[^>]*>",
+          "<\/(style)>"
+        ],
+        "id": {
+          "match": [
+            "\\s+(id)="
+          ],
+          "before": {
+            "contentText": "🆔"
+          }
+        },
+        "key": {
+          "match": [
+            "\\s+(key)="
+          ],
+          "before": {
+            "contentText": "🫧"
+          }
+        },
+        "#f08b47": [
+          "// TODO:.*"
+        ],
+        "#c41f0a": [
+          "// IMPORTANT:.*"
+        ],
+        "#6c09ce": [
+          "<script.*lang=\"(\\w+)\">"
+        ],
+        "#10b2ca": {
+          "match": [
+            "^\\s*//\\s*([0-9]+[.)、])"
+          ]
+        },
+        "#1a5d70": {
+          "match": [
+            "^\\s*//[^\u4e00-\u9fa5\\n]*([\u4e00-\u9fa5,. ]+)[^\\n]*"
+          ]
+        },
+        "#6d6d6d": {
+          "match": [
+            "(<!--[\\s\\S]*?-->)",
+            "^\\s*(//[^\\n]*)"
+          ]
         }
+      }
+    }
+  }
+}
 ```
 
 ## Feature
