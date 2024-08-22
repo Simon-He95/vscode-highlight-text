@@ -83,7 +83,7 @@
     "@rollup/pluginutils": "^5.1.0",
     "@types/node": "^18.19.44",
     "@types/vscode": "^1.92.0",
-    "@vscode-use/utils": "^0.1.18",
+    "@vscode-use/utils": "^0.1.21",
     "bumpp": "^9.5.1",
     "eslint": "^8.57.0",
     "esno": "^0.16.3",
