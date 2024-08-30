@@ -155,7 +155,7 @@ export const { activate, deactivate } = createExtension(() => {
     const run = (matchText: string, matcher: RegExpExecArray, style: TextEditorDecorationType) => {
       const start = matcher.index! + matcher[0].indexOf(matchText)
       const end = start + (matchText.length)
-      const range = createRange(getPosition(start), getPosition(end))
+      const range = createRange(getPosition(start).position, getPosition(end).position)
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
       if (!isClear && clearStyle[cacheKey].has(positionKey)) {
@@ -253,7 +253,7 @@ export const { activate, deactivate } = createExtension(() => {
                 // 这里不能一个个设置，之前的样式会丢失
                 const start = matcher.index! + matcher[0].indexOf(matchText)
                 const end = start + matchText.length
-                const range = createRange(getPosition(start), getPosition(end))
+                const range = createRange(getPosition(start).position, getPosition(end).position)
                 ranges.push(range)
                 const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
                 tempKeys.push(positionKey)
