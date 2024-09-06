@@ -293,13 +293,13 @@ export const { activate, deactivate } = createExtension(() => {
   updateVStyle()
 
   return [
-    addEventListener('text-change', updateVStyle),
+    addEventListener('text-change', () => updateVStyle()),
     addEventListener('activeText-change', (e) => {
       if (e)
         updateVStyle(true)
     }),
-    addEventListener('config-change', updateVStyle),
-    addEventListener('theme-change', updateVStyle),
+    addEventListener('config-change', () => updateVStyle()),
+    addEventListener('theme-change', () => updateVStyle()),
     registerCommand('vscode-highlight-text.selectTemplate', () => {
       const options = Object.keys(templates)
       if (!options.length)
@@ -312,7 +312,7 @@ export const { activate, deactivate } = createExtension(() => {
         // 把用户的 config 和 模板的 config 合并
         const mergeConfig = deepMerge(userConfig, templateConfig)
         setConfiguration('vscode-highlight-text.rules', mergeConfig)
-        nextTick(updateVStyle)
+        nextTick(() => updateVStyle(true))
       })
     }),
   ]
