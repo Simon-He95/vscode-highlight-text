@@ -132,6 +132,7 @@ export const { activate, deactivate } = createExtension(() => {
   }
 
   const updateVStyle = debounce((isClear: boolean) => {
+    setStyle(createStyle({}), [])
     const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
     const filter = createFilter(defaultExclude)
     const currentFileUrl = getCurrentFileUrl(true)
