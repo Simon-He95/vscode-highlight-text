@@ -1,7 +1,7 @@
 import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import { createFilter } from '@rollup/pluginutils'
-import type { TextEditorDecorationType } from 'vscode'
+import { DecorationRangeBehavior, type TextEditorDecorationType } from 'vscode'
 import templates from './template'
 import type { ClearStyle, UserConfig } from './type'
 import { safeMatchAll, safeReplace } from './utils'
@@ -132,7 +132,6 @@ export const { activate, deactivate } = createExtension(() => {
   }
 
   const updateVStyle = debounce((isClear: boolean) => {
-    setStyle(createStyle({}), [])
     const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
     const filter = createFilter(defaultExclude)
     const currentFileUrl = getCurrentFileUrl(true)
@@ -180,10 +179,11 @@ export const { activate, deactivate } = createExtension(() => {
     for (const userConfigurationStyle of userConfigurationStyles) {
       for (const color in userConfigurationStyle) {
         let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
-        let styleOption: any = { color, isWholeLine: false }
+        const baseOption: any = { color, isWholeLine: false, rangeBehavior: DecorationRangeBehavior.ClosedClosed }
+        let styleOption: any = baseOption
         const ranges: any = []
         if (!Array.isArray(option) && option.match) {
-          styleOption = Object.assign({ color }, option, { after: option.after }, { before: option.before }) as any
+          styleOption = Object.assign({ ...styleOption, color }, option, { after: option.after }, { before: option.before }) as any
           option = option.match
         }
         const style = createStyle(styleOption)
@@ -219,7 +219,7 @@ export const { activate, deactivate } = createExtension(() => {
                     break
                   if (!matchText)
                     continue
-                  const style = createStyle(Object.assign({ color, isWholeLine: false }, option))
+                  const style = createStyle(Object.assign({ ...baseOption }, option))
                   run(matchText, matcher, style)
                 }
               }
@@ -234,7 +234,7 @@ export const { activate, deactivate } = createExtension(() => {
                   if (!matchText)
                     continue
 
-                  const style = createStyle({ color: c, isWholeLine: false })
+                  const style = createStyle({ ...baseOption })
                   run(matchText, matcher, style)
                 }
               }
