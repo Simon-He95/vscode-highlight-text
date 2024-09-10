@@ -225,8 +225,8 @@ export const { activate, deactivate } = createExtension(() => {
               }
               else if (isArray(colors)) {
                 for (let i = 0; i < colors.length; i++) {
-                  const c = colors[i]
-                  if (!c)
+                  const color = colors[i]
+                  if (!color)
                     continue
                   const matchText = matcher[i + 1]
                   if (matchText === undefined)
@@ -234,7 +234,7 @@ export const { activate, deactivate } = createExtension(() => {
                   if (!matchText)
                     continue
 
-                  const style = createStyle({ ...baseOption })
+                  const style = createStyle({ ...baseOption, color })
                   run(matchText, matcher, style)
                 }
               }
