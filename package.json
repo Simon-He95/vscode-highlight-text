@@ -28,7 +28,7 @@
     "dist"
   ],
   "engines": {
-    "vscode": "^1.93.0"
+    "vscode": "^1.94.0"
   },
   "activationEvents": [
     "onStartupFinished"
@@ -80,18 +80,18 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^2.27.3",
-    "@rollup/pluginutils": "^5.1.0",
-    "@types/node": "^18.19.50",
-    "@types/vscode": "^1.93.0",
-    "@vscode-use/utils": "^0.1.29",
-    "bumpp": "^9.5.2",
-    "eslint": "^8.57.0",
+    "@rollup/pluginutils": "^5.1.2",
+    "@types/node": "^18.19.54",
+    "@types/vscode": "^1.94.0",
+    "@vscode-use/utils": "^0.1.31",
+    "bumpp": "^9.6.1",
+    "eslint": "^8.57.1",
     "esno": "^0.16.3",
-    "lazy-js-utils": "^0.0.99",
+    "lazy-js-utils": "^0.1.1",
     "pnpm": "^8.15.9",
     "rimraf": "^4.4.1",
     "tsup": "^6.7.0",
-    "typescript": "^5.5.4",
+    "typescript": "^5.6.2",
     "vitest": "^0.29.8",
     "vsce": "^2.15.0"
   }

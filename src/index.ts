@@ -294,7 +294,10 @@ export const { activate, deactivate } = createExtension(() => {
   updateVStyle()
 
   return [
-    addEventListener('text-change', () => updateVStyle()),
+    addEventListener('text-change', ({ document }) => {
+      if (document.languageId !== 'Log')
+        updateVStyle(true)
+    }),
     addEventListener('activeText-change', (e) => {
       if (e)
         updateVStyle(true)
