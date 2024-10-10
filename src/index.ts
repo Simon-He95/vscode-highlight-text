@@ -153,7 +153,17 @@ export const { activate, deactivate } = createExtension(() => {
     const cache = clearStyle[cacheKey]
 
     const run = (matchText: string, matcher: RegExpExecArray, style: TextEditorDecorationType) => {
-      const start = matcher.index! + matcher[0].indexOf(matchText)
+      // 以免之前的匹配干扰
+      let text = matcher[0]
+      for (let index = 1; index < matcher.length; index++) {
+        const matchWord = matcher[index]
+        if (matchWord === matchText) {
+          break
+        }
+        text = text.replace(matchWord, '嘿'.repeat(matchWord.length))
+      }
+
+      const start = matcher.index! + text.indexOf(matchText)
       const end = start + (matchText.length)
       const range = createRange(getPosition(start).position, getPosition(end).position)
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
@@ -252,7 +262,16 @@ export const { activate, deactivate } = createExtension(() => {
                 if (!matchText)
                   continue
                 // 这里不能一个个设置，之前的样式会丢失
-                const start = matcher.index! + matcher[0].indexOf(matchText)
+                // 以免之前的匹配干扰
+                let text = matcher[0]
+                for (let index = 1; index < matcher.length; index++) {
+                  const matchWord = matcher[index]
+                  if (matchWord === matchText) {
+                    break
+                  }
+                  text = text.replace(matchWord, '嘿'.repeat(matchWord.length))
+                }
+                const start = matcher.index! + text.indexOf(matchText)
                 const end = start + matchText.length
                 const range = createRange(getPosition(start).position, getPosition(end).position)
                 ranges.push(range)
