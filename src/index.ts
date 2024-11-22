@@ -1,4 +1,4 @@
-import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
+import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, getSelection, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import { createFilter } from '@rollup/pluginutils'
 import { DecorationRangeBehavior, type TextEditorDecorationType } from 'vscode'
@@ -166,23 +166,61 @@ export const { activate, deactivate } = createExtension(() => {
       const start = matcher.index! + text.indexOf(matchText)
       const end = start + (matchText.length)
       const range = createRange(getPosition(start).position, getPosition(end).position)
+      const { selection } = getSelection()!
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
-      if (!isClear && clearStyle[cacheKey].has(positionKey)) {
+      if (clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
-        clearStyle[cacheKey].delete(positionKey)
-        stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+        if (selection.active.line > range.start.line) {
+          stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+          clearStyle[cacheKey].delete(positionKey)
+        }
+        else {
+          clear()
+          stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
+        }
       }
       else {
-        const clear = setStyle(style, range)!
-        stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+        stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
       }
     }
 
     if (!cache)
       clearStyle[cacheKey] = new Map()
 
+    // text 应该从 changed 背后截取，因为不会印象到之前的
+    // 获取当前光标位置的文本
     let text = getActiveText()!
+    const { selectionArray } = getSelection()!
+    // 获取最前面一个selection
+    let selection = selectionArray[0]
+    if (!isClear) {
+      const min: number[] = []
+      if (selectionArray.length > 1) {
+        // todo: 如果变更的内容不涉及换行，后面的内容也不需要被追加到更新 list 中
+        selectionArray.forEach((item, i) => {
+          if (!min.length) {
+            min.push(item.start.line, item.start.character, i)
+          }
+          else {
+            const [m1, m2] = min
+            const c1 = item.start.line
+            const c2 = item.start.character
+            if (m1 < c1)
+              return
+            if (m1 === c1 && m2 < c2)
+              return
+            min[0] = c1
+            min[1] = c2
+            min[2] = i
+          }
+        })
+        selection = selectionArray[min[2]]
+      }
+    }
+    else {
+      clearStyle[cacheKey].clear()
+    }
 
     if (!text)
       return
@@ -274,8 +312,8 @@ export const { activate, deactivate } = createExtension(() => {
                 const start = matcher.index! + text.indexOf(matchText)
                 const end = start + matchText.length
                 const range = createRange(getPosition(start).position, getPosition(end).position)
-                ranges.push(range)
                 const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
+                ranges.push(range)
                 tempKeys.push(positionKey)
               }
               else if (colors && !isArray(colors)) {
@@ -287,17 +325,22 @@ export const { activate, deactivate } = createExtension(() => {
             }
           })
         }
-        const key = tempKeys.join('-')
+        const key = tempKeys.join('+')
         if (!key)
           continue
-        if (!isClear && clearStyle[cacheKey].has(key)) {
-          const clear = clearStyle[cacheKey].get(key)!
-          clearStyle[cacheKey].delete(key)
-          stacks.push(() => clearStyle[cacheKey].set(key, clear))
+        if (clearStyle[cacheKey].has(key)) {
+          const isUpdate = !tempKeys.every(k => +k.split('-')[0] < selection.active.line)
+          if (isUpdate) {
+            stacks.push(() => clearStyle[cacheKey].set(key, setStyle(style, ranges)!))
+          }
+          else {
+            const clear = clearStyle[cacheKey].get(key)!
+            stacks.push(() => clearStyle[cacheKey].set(key, clear))
+            clearStyle[cacheKey].delete(key)
+          }
         }
         else {
-          const clear = setStyle(style, ranges)!
-          stacks.push(() => clearStyle[cacheKey].set(key, clear))
+          stacks.push(() => clearStyle[cacheKey].set(key, setStyle(style, ranges)!))
         }
       }
     }
@@ -306,22 +349,25 @@ export const { activate, deactivate } = createExtension(() => {
     clearStyle[cacheKey].forEach((clear) => {
       clear()
     })
-    clearStyle[cacheKey].clear()
     stacks.forEach(add => add())
   }, 100)
 
-  updateVStyle()
+  updateVStyle(true)
 
   return [
-    addEventListener('text-change', ({ document }) => {
-      if (document.languageId !== 'Log')
-        updateVStyle(true)
+    addEventListener('text-change', ({ document, contentChanges }) => {
+      const change = contentChanges.filter(item => item.rangeLength || item.text)
+      if (document.languageId !== 'Log' && change.length)
+        updateVStyle()
     }),
     addEventListener('activeText-change', (e) => {
       if (e)
         updateVStyle(true)
     }),
-    addEventListener('config-change', () => updateVStyle()),
+    addEventListener('config-change', (e) => {
+      if (e.affectsConfiguration('vscode-highlight-text'))
+        updateVStyle(true)
+    }),
     addEventListener('theme-change', () => updateVStyle()),
     registerCommand('vscode-highlight-text.selectTemplate', () => {
       const options = Object.keys(templates)
