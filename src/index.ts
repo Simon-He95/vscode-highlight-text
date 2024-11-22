@@ -1,4 +1,4 @@
-import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, getSelection, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
+import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import { createFilter } from '@rollup/pluginutils'
 import { DecorationRangeBehavior, type TextEditorDecorationType } from 'vscode'
@@ -131,7 +131,7 @@ export const { activate, deactivate } = createExtension(() => {
     return lan
   }
 
-  const updateVStyle = debounce((isClear: boolean) => {
+  const updateVStyle = debounce(() => {
     const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
     const filter = createFilter(defaultExclude)
     const currentFileUrl = getCurrentFileUrl(true)
@@ -166,19 +166,12 @@ export const { activate, deactivate } = createExtension(() => {
       const start = matcher.index! + text.indexOf(matchText)
       const end = start + (matchText.length)
       const range = createRange(getPosition(start).position, getPosition(end).position)
-      const { selection } = getSelection()!
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
       if (clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
-        if (selection.active.line > range.start.line) {
-          stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
-          clearStyle[cacheKey].delete(positionKey)
-        }
-        else {
-          clear()
-          stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
-        }
+        stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+        clearStyle[cacheKey].delete(positionKey)
       }
       else {
         stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
@@ -188,54 +181,25 @@ export const { activate, deactivate } = createExtension(() => {
     if (!cache)
       clearStyle[cacheKey] = new Map()
 
-    // text 应该从 changed 背后截取，因为不会印象到之前的
     // 获取当前光标位置的文本
     let text = getActiveText()!
-    const { selectionArray } = getSelection()!
-    // 获取最前面一个selection
-    let selection = selectionArray[0]
-    if (!isClear) {
-      const min: number[] = []
-      if (selectionArray.length > 1) {
-        // todo: 如果变更的内容不涉及换行，后面的内容也不需要被追加到更新 list 中
-        selectionArray.forEach((item, i) => {
-          if (!min.length) {
-            min.push(item.start.line, item.start.character, i)
-          }
-          else {
-            const [m1, m2] = min
-            const c1 = item.start.line
-            const c2 = item.start.character
-            if (m1 < c1)
-              return
-            if (m1 === c1 && m2 < c2)
-              return
-            min[0] = c1
-            min[1] = c2
-            min[2] = i
-          }
-        })
-        selection = selectionArray[min[2]]
-      }
-    }
-    else {
-      clearStyle[cacheKey].clear()
-    }
 
-    if (!text)
+    if (!text) {
+      clearStyle[cacheKey].forEach((clear, key) => {
+        clear()
+        clearStyle[cacheKey].delete(key)
+      })
       return
+    }
     for (const userConfigurationStyle of userConfigurationStyles) {
       for (const color in userConfigurationStyle) {
         let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
         const baseOption: any = { color, isWholeLine: false, rangeBehavior: DecorationRangeBehavior.ClosedClosed }
         let styleOption: any = baseOption
-        const ranges: any = []
         if (!Array.isArray(option) && option.match) {
           styleOption = Object.assign({ ...styleOption, color }, option, { after: option.after }, { before: option.before }) as any
           option = option.match
         }
-        const style = createStyle(styleOption)
-        const tempKeys: string[] = []
         if (Array.isArray(option) && option.length) {
           option.forEach((o) => {
             const reg = isArray(o)
@@ -313,8 +277,15 @@ export const { activate, deactivate } = createExtension(() => {
                 const end = start + matchText.length
                 const range = createRange(getPosition(start).position, getPosition(end).position)
                 const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
-                ranges.push(range)
-                tempKeys.push(positionKey)
+                const style = createStyle(styleOption)
+                if (clearStyle[cacheKey].has(positionKey)) {
+                  const clear = clearStyle[cacheKey].get(positionKey)!
+                  stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+                  clearStyle[cacheKey].delete(positionKey)
+                }
+                else {
+                  stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
+                }
               }
               else if (colors && !isArray(colors)) {
                 return message.error(`colors 字段类型错误，需要是 colorsArray`)
@@ -325,34 +296,18 @@ export const { activate, deactivate } = createExtension(() => {
             }
           })
         }
-        const key = tempKeys.join('+')
-        if (!key)
-          continue
-        if (clearStyle[cacheKey].has(key)) {
-          const isUpdate = !tempKeys.every(k => +k.split('-')[0] < selection.active.line)
-          if (isUpdate) {
-            stacks.push(() => clearStyle[cacheKey].set(key, setStyle(style, ranges)!))
-          }
-          else {
-            const clear = clearStyle[cacheKey].get(key)!
-            stacks.push(() => clearStyle[cacheKey].set(key, clear))
-            clearStyle[cacheKey].delete(key)
-          }
-        }
-        else {
-          stacks.push(() => clearStyle[cacheKey].set(key, setStyle(style, ranges)!))
-        }
       }
     }
 
     // 将剩余 clearStyle 中 cache 清楚，再增加 stacks 中需要新增的
-    clearStyle[cacheKey].forEach((clear) => {
+    clearStyle[cacheKey].forEach((clear, key) => {
       clear()
+      clearStyle[cacheKey].delete(key)
     })
     stacks.forEach(add => add())
   }, 100)
 
-  updateVStyle(true)
+  updateVStyle()
 
   return [
     addEventListener('text-change', ({ document, contentChanges }) => {
@@ -362,11 +317,11 @@ export const { activate, deactivate } = createExtension(() => {
     }),
     addEventListener('activeText-change', (e) => {
       if (e)
-        updateVStyle(true)
+        updateVStyle()
     }),
     addEventListener('config-change', (e) => {
       if (e.affectsConfiguration('vscode-highlight-text'))
-        updateVStyle(true)
+        updateVStyle()
     }),
     addEventListener('theme-change', () => updateVStyle()),
     registerCommand('vscode-highlight-text.selectTemplate', () => {
@@ -381,7 +336,7 @@ export const { activate, deactivate } = createExtension(() => {
         // 把用户的 config 和 模板的 config 合并
         const mergeConfig = deepMerge(userConfig, templateConfig)
         setConfiguration('vscode-highlight-text.rules', mergeConfig)
-        nextTick(() => updateVStyle(true))
+        nextTick(() => updateVStyle())
       })
     }),
   ]
