@@ -1,7 +1,8 @@
 import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import { createFilter } from '@rollup/pluginutils'
-import { DecorationRangeBehavior, type TextEditorDecorationType } from 'vscode'
+import type { DecorationRenderOptions } from 'vscode'
+import { DecorationRangeBehavior } from 'vscode'
 import templates from './template'
 import type { ClearStyle, UserConfig } from './type'
 import { safeMatchAll, safeReplace } from './utils'
@@ -131,7 +132,7 @@ export const { activate, deactivate } = createExtension(() => {
     return lan
   }
 
-  const updateVStyle = debounce(() => {
+  const updateVStyle = debounce((refresh: boolean) => {
     const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
     const filter = createFilter(defaultExclude)
     const currentFileUrl = getCurrentFileUrl(true)
@@ -151,8 +152,11 @@ export const { activate, deactivate } = createExtension(() => {
 
     const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
     const cache = clearStyle[cacheKey]
+    if (refresh && cache)
+      cache.clear()
 
-    const run = (matchText: string, matcher: RegExpExecArray, style: TextEditorDecorationType) => {
+    const run = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
+      const style = createStyle(styleOption)
       // 以免之前的匹配干扰
       let text = matcher[0]
       for (let index = 1; index < matcher.length; index++) {
@@ -167,7 +171,7 @@ export const { activate, deactivate } = createExtension(() => {
       const end = start + (matchText.length)
       const range = createRange(getPosition(start).position, getPosition(end).position)
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
-      const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
+      const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, JSON.stringify(styleOption)].join('-')
       if (clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
         stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
@@ -231,8 +235,7 @@ export const { activate, deactivate } = createExtension(() => {
                     break
                   if (!matchText)
                     continue
-                  const style = createStyle(Object.assign({ ...baseOption }, option))
-                  run(matchText, matcher, style)
+                  run(matchText, matcher, Object.assign({ ...baseOption }, option))
                 }
               }
               else if (isArray(colors)) {
@@ -246,8 +249,7 @@ export const { activate, deactivate } = createExtension(() => {
                   if (!matchText)
                     continue
 
-                  const style = createStyle({ ...baseOption, color })
-                  run(matchText, matcher, style)
+                  run(matchText, matcher, { ...baseOption, color })
                 }
               }
               else if (!colors) {
@@ -276,7 +278,7 @@ export const { activate, deactivate } = createExtension(() => {
                 const start = matcher.index! + text.indexOf(matchText)
                 const end = start + matchText.length
                 const range = createRange(getPosition(start).position, getPosition(end).position)
-                const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character].join('-')
+                const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, JSON.stringify(styleOption)].join('-')
                 const style = createStyle(styleOption)
                 if (clearStyle[cacheKey].has(positionKey)) {
                   const clear = clearStyle[cacheKey].get(positionKey)!
@@ -317,13 +319,13 @@ export const { activate, deactivate } = createExtension(() => {
     }),
     addEventListener('activeText-change', (e) => {
       if (e)
-        updateVStyle()
+        updateVStyle(true)
     }),
     addEventListener('config-change', (e) => {
       if (e.affectsConfiguration('vscode-highlight-text'))
-        updateVStyle()
+        updateVStyle(true)
     }),
-    addEventListener('theme-change', () => updateVStyle()),
+    addEventListener('theme-change', () => updateVStyle(true)),
     registerCommand('vscode-highlight-text.selectTemplate', () => {
       const options = Object.keys(templates)
       if (!options.length)
