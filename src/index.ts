@@ -171,7 +171,8 @@ export const { activate, deactivate } = createExtension(() => {
       const end = start + (matchText.length)
       const range = createRange(getPosition(start).position, getPosition(end).position)
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
-      const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, JSON.stringify(styleOption)].join('-')
+      const rangeText = getActiveText()!.slice(start, end)
+      const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
       if (clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
         stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
@@ -278,7 +279,8 @@ export const { activate, deactivate } = createExtension(() => {
                 const start = matcher.index! + text.indexOf(matchText)
                 const end = start + matchText.length
                 const range = createRange(getPosition(start).position, getPosition(end).position)
-                const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, JSON.stringify(styleOption)].join('-')
+                const rangeText = getActiveText()!.slice(start, end)
+                const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
                 const style = createStyle(styleOption)
                 if (clearStyle[cacheKey].has(positionKey)) {
                   const clear = clearStyle[cacheKey].get(positionKey)!
@@ -307,7 +309,7 @@ export const { activate, deactivate } = createExtension(() => {
       clearStyle[cacheKey].delete(key)
     })
     stacks.forEach(add => add())
-  }, 100)
+  }, 0)
 
   updateVStyle()
 
