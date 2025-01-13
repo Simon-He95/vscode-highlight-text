@@ -156,7 +156,7 @@ export const { activate, deactivate } = createExtension(() => {
       cache.clear()
 
     const run = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
-      const style = createStyle(styleOption)
+      const style = createStyle(wrapperStyleForBackGround(styleOption))
       // 以免之前的匹配干扰
       let text = matcher[0]
       for (let index = 1; index < matcher.length; index++) {
@@ -281,7 +281,7 @@ export const { activate, deactivate } = createExtension(() => {
                 const range = createRange(getPosition(start).position, getPosition(end).position)
                 const rangeText = getActiveText()!.slice(start, end)
                 const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
-                const style = createStyle(styleOption)
+                const style = createStyle(wrapperStyleForBackGround(styleOption))
                 if (clearStyle[cacheKey].has(positionKey)) {
                   const clear = clearStyle[cacheKey].get(positionKey)!
                   stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
@@ -349,3 +349,15 @@ export const { activate, deactivate } = createExtension(() => {
     clearStyle[key].clear()
   })
 })
+
+function wrapperStyleForBackGround(styleOption: any) {
+  if (styleOption.background) {
+    if (!styleOption.textDecoration) {
+      styleOption.textDecoration = `none; background:${styleOption.background}`
+    }
+    else {
+      styleOption.textDecoration = `${styleOption.textDecoration}${styleOption.textDecoration.endsWith(';') ? '' : ';'} background:${styleOption.background}`
+    }
+  }
+  return styleOption
+}
