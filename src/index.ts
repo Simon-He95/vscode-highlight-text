@@ -161,9 +161,12 @@ export const { activate, deactivate } = createExtension(() => {
       let text = matcher[0]
       for (let index = 1; index < matcher.length; index++) {
         const matchWord = matcher[index]
-        if (matchWord === matchText) {
+        if (!matchWord)
+          continue
+
+        if (matchWord === matchText)
           break
-        }
+
         text = text.replace(matchWord, '嘿'.repeat(matchWord.length))
       }
 
@@ -205,6 +208,7 @@ export const { activate, deactivate } = createExtension(() => {
           styleOption = Object.assign({ ...styleOption, color }, option, { after: option.after }, { before: option.before }) as any
           option = option.match
         }
+
         if (Array.isArray(option) && option.length) {
           option.forEach((o) => {
             const reg = isArray(o)
@@ -232,8 +236,9 @@ export const { activate, deactivate } = createExtension(() => {
                   if (!isObject(option))
                     return message.error('matchCss 类型错误')
                   const matchText = matcher[i + 1]
-                  if (matchText === undefined)
+                  if (matchText === undefined && matcher[i + 2] === undefined)
                     break
+
                   if (!matchText)
                     continue
                   run(matchText, matcher, Object.assign({ ...baseOption }, option))
@@ -245,7 +250,7 @@ export const { activate, deactivate } = createExtension(() => {
                   if (!color)
                     continue
                   const matchText = matcher[i + 1]
-                  if (matchText === undefined)
+                  if (matchText === undefined && matcher[i + 2] === undefined)
                     break
                   if (!matchText)
                     continue
