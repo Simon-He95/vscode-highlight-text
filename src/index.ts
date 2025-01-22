@@ -1,10 +1,10 @@
+import type { DecorationRenderOptions } from 'vscode'
+import type { ClearStyle, UserConfig } from './type'
+import { createFilter } from '@rollup/pluginutils'
 import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
-import { createFilter } from '@rollup/pluginutils'
-import type { DecorationRenderOptions } from 'vscode'
 import { DecorationRangeBehavior } from 'vscode'
 import templates from './template'
-import type { ClearStyle, UserConfig } from './type'
 import { safeMatchAll, safeReplace } from './utils'
 
 const defaultConfig = {
@@ -223,7 +223,7 @@ export const { activate, deactivate } = createExtension(() => {
               for (const regStr of ignoreReg.filter(Boolean)) {
                 const reg = isArray(regStr)
                   ? new RegExp(regStr[0], regStr[1])
-                  : new RegExp(regStr, 'g')
+                  : new RegExp(regStr, 'gm')
                 text = safeReplace(text, reg, (_: string) => ' '.repeat(_.length), 1000)
               }
             }
