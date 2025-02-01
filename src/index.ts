@@ -152,8 +152,11 @@ export const { activate, deactivate } = createExtension(() => {
 
     const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
     const cache = clearStyle[cacheKey]
-    if (refresh && cache)
-      cache.clear()
+    if (refresh) {
+      Object.keys(clearStyle).forEach((key) => {
+        clearStyle[key].clear()
+      })
+    }
 
     const run = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
       const style = createStyle(wrapperStyleForBackGround(styleOption))
@@ -308,7 +311,7 @@ export const { activate, deactivate } = createExtension(() => {
       }
     }
 
-    // 将剩余 clearStyle 中 cache 清楚，再增加 stacks 中需要新增的
+    // 将剩余 clearStyle 中 cache 清除，再增加 stacks 中需要新增的
     clearStyle[cacheKey].forEach((clear, key) => {
       clear()
       clearStyle[cacheKey].delete(key)
@@ -345,7 +348,7 @@ export const { activate, deactivate } = createExtension(() => {
         // 把用户的 config 和 模板的 config 合并
         const mergeConfig = deepMerge(userConfig, templateConfig)
         setConfiguration('vscode-highlight-text.rules', mergeConfig)
-        nextTick(() => updateVStyle())
+        nextTick(() => updateVStyle(true))
       })
     }),
   ]
