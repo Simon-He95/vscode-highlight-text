@@ -80,7 +80,7 @@
     "@types/node": "^18.19.71",
     "@types/vscode": "^1.83.1",
     "@vscode-use/utils": "^0.1.40",
-    "@vscode/vsce": "^3.2.1",
+    "@vscode/vsce": "^3.2.2",
     "bumpp": "^9.10.1",
     "eslint": "^9.18.0",
     "lazy-js-utils": "^0.1.28",
