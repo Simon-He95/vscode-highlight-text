@@ -3,7 +3,7 @@
   "name": "vscode-highlight-text",
   "displayName": "vscode-highlight-text",
   "version": "0.0.44",
-  "description": "vscode-highlight-text",
+  "description": "A VSCode extension to highlight text in various languages like Vue, React, Svelte, Solid, Astro, and Markdown.",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
   "funding": "https://github.com/sponsors/Simon-He95",
@@ -18,13 +18,27 @@
   "sponsor": {
     "url": "https://github.com/Simon-He95/sponsor"
   },
+  "keywords": [
+    "vscode",
+    "highlight",
+    "text",
+    "vue",
+    "react",
+    "svelte",
+    "solid",
+    "astro",
+    "markdown",
+    "syntax highlighting"
+  ],
   "categories": [
-    "Other"
+    "Other",
+    "Programming Languages",
+    "Linters"
   ],
   "main": "./dist/index.js",
   "icon": "icon.png",
   "engines": {
-    "vscode": "^1.83.1"
+    "vscode": "^1.77.0"
   },
   "activationEvents": [
     "onStartupFinished"
@@ -44,7 +58,7 @@
             "solid": {},
             "markdown": {}
           },
-          "description": "highlight vue | react | svelte | solid | astro | ... style"
+          "description": "Highlight styles for Vue, React, Svelte, Solid, Astro, and Markdown."
         },
         "vscode-highlight-text.exclude": {
           "type": "array",
@@ -52,7 +66,7 @@
             "**/dist/**",
             "**/node_modules/**"
           ],
-          "description": "The directory you want to be skipped"
+          "description": "Directories to be skipped."
         }
       }
     },
@@ -78,7 +92,7 @@
     "@antfu/eslint-config": "^3.15.0",
     "@rollup/pluginutils": "^5.1.4",
     "@types/node": "^18.19.71",
-    "@types/vscode": "^1.83.1",
+    "@types/vscode": "1.77.0",
     "@vscode-use/utils": "^0.1.40",
     "@vscode/vsce": "^3.2.2",
     "bumpp": "^9.10.1",
