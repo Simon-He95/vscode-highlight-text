@@ -1,7 +1,7 @@
 import type { DecorationRenderOptions } from 'vscode'
 import type { ClearStyle, UserConfig } from './type'
 import { createFilter } from '@rollup/pluginutils'
-import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, nextTick, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
+import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import { DecorationRangeBehavior } from 'vscode'
 import templates from './template'
@@ -84,8 +84,9 @@ const defaultConfig = {
   },
 }
 const clearStyle: ClearStyle = {}
+let config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
+
 function getUserConfigurationStyle(lan: string, mode: 'dark' | 'light') {
-  const config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
   const keys = Object.keys(config).filter(key => isMatch(key, lan))
   const result = keys.reduceRight((r, k) => {
     const value = config[k][mode]
@@ -152,11 +153,25 @@ export const { activate, deactivate } = createExtension(() => {
 
     const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
     const cache = clearStyle[cacheKey]
+
     if (refresh) {
       Object.keys(clearStyle).forEach((key) => {
         clearStyle[key].clear()
+        delete clearStyle[key]
       })
     }
+    else {
+      // 删除其他文件的缓存
+      Object.keys(clearStyle).forEach((key) => {
+        if (key !== cacheKey) {
+          clearStyle[key].clear()
+          delete clearStyle[key]
+        }
+      })
+    }
+
+    if (!cache)
+      clearStyle[cacheKey] = new Map()
 
     const run = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
       const style = createStyle(wrapperStyleForBackGround(styleOption))
@@ -188,9 +203,6 @@ export const { activate, deactivate } = createExtension(() => {
         stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
       }
     }
-
-    if (!cache)
-      clearStyle[cacheKey] = new Map()
 
     // 获取当前光标位置的文本
     let text = getActiveText()!
@@ -332,8 +344,10 @@ export const { activate, deactivate } = createExtension(() => {
         updateVStyle(true)
     }),
     addEventListener('config-change', (e) => {
-      if (e.affectsConfiguration('vscode-highlight-text'))
+      if (e.affectsConfiguration('vscode-highlight-text')) {
+        config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
         updateVStyle(true)
+      }
     }),
     addEventListener('theme-change', () => updateVStyle(true)),
     registerCommand('vscode-highlight-text.selectTemplate', () => {
@@ -347,14 +361,16 @@ export const { activate, deactivate } = createExtension(() => {
         const userConfig = getConfiguration('vscode-highlight-text.rules')
         // 把用户的 config 和 模板的 config 合并
         const mergeConfig = deepMerge(userConfig, templateConfig)
-        setConfiguration('vscode-highlight-text.rules', mergeConfig)
-        nextTick(() => updateVStyle(true))
+        setConfiguration('vscode-highlight-text.rules', mergeConfig).then(() => {
+          updateVStyle(true)
+        })
       })
     }),
   ]
 }, () => {
   Object.keys(clearStyle).forEach((key) => {
     clearStyle[key].clear()
+    delete clearStyle[key]
   })
 })
 
