@@ -2,7 +2,7 @@
   "publisher": "simonhe",
   "name": "vscode-highlight-text",
   "displayName": "vscode-highlight-text",
-  "version": "0.0.44",
+  "version": "0.0.45",
   "description": "A VSCode extension to highlight text in various languages like Vue, React, Svelte, Solid, Astro, and Markdown.",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
