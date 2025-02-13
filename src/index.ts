@@ -194,7 +194,7 @@ export const { activate, deactivate } = createExtension(() => {
       // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
       const rangeText = getActiveText()!.slice(start, end)
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
-      if (clearStyle[cacheKey].has(positionKey)) {
+      if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
         stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
         clearStyle[cacheKey].delete(positionKey)
@@ -302,7 +302,7 @@ export const { activate, deactivate } = createExtension(() => {
                 const rangeText = getActiveText()!.slice(start, end)
                 const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
                 const style = createStyle(wrapperStyleForBackGround(styleOption))
-                if (clearStyle[cacheKey].has(positionKey)) {
+                if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
                   const clear = clearStyle[cacheKey].get(positionKey)!
                   stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
                   clearStyle[cacheKey].delete(positionKey)
