@@ -196,11 +196,11 @@ export const { activate, deactivate } = createExtension(() => {
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
       if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
-        stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+        stacks.push(() => clearStyle[cacheKey]?.set(positionKey, clear))
         clearStyle[cacheKey].delete(positionKey)
       }
       else {
-        stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
+        stacks.push(() => clearStyle[cacheKey]?.set(positionKey, setStyle(style, range)!))
       }
     }
 
@@ -208,7 +208,7 @@ export const { activate, deactivate } = createExtension(() => {
     let text = getActiveText()!
 
     if (!text) {
-      clearStyle[cacheKey].forEach((clear, key) => {
+      clearStyle[cacheKey]?.forEach((clear, key) => {
         clear()
         clearStyle[cacheKey].delete(key)
       })
@@ -304,11 +304,11 @@ export const { activate, deactivate } = createExtension(() => {
                 const style = createStyle(wrapperStyleForBackGround(styleOption))
                 if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
                   const clear = clearStyle[cacheKey].get(positionKey)!
-                  stacks.push(() => clearStyle[cacheKey].set(positionKey, clear))
+                  stacks.push(() => clearStyle[cacheKey]?.set(positionKey, clear))
                   clearStyle[cacheKey].delete(positionKey)
                 }
                 else {
-                  stacks.push(() => clearStyle[cacheKey].set(positionKey, setStyle(style, range)!))
+                  stacks.push(() => clearStyle[cacheKey]?.set(positionKey, setStyle(style, range)!))
                 }
               }
               else if (colors && !isArray(colors)) {
@@ -324,7 +324,7 @@ export const { activate, deactivate } = createExtension(() => {
     }
 
     // 将剩余 clearStyle 中 cache 清除，再增加 stacks 中需要新增的
-    clearStyle[cacheKey].forEach((clear, key) => {
+    clearStyle[cacheKey]?.forEach((clear, key) => {
       clear()
       clearStyle[cacheKey].delete(key)
     })
