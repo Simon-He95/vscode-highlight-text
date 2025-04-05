@@ -1,7 +1,7 @@
-import type { DecorationRenderOptions } from 'vscode'
+import type { DecorationRenderOptions, Range } from 'vscode'
 import type { ClearStyle, UserConfig } from './type'
 import { createFilter } from '@rollup/pluginutils'
-import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
+import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditor, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
 import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
 import { DecorationRangeBehavior } from 'vscode'
 import templates from './template'
@@ -173,10 +173,40 @@ export const { activate, deactivate } = createExtension(() => {
     if (!cache)
       clearStyle[cacheKey] = new Map()
 
-    const run = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
+    // Get full text
+    const fullText = getActiveText()!
+    if (!fullText) {
+      clearStyle[cacheKey]?.forEach((clear, key) => {
+        clear()
+        clearStyle[cacheKey].delete(key)
+      })
+      return
+    }
+
+    // Get visible range from active editor
+    const editor = getActiveTextEditor()
+    if (!editor)
+      return
+
+    // Calculate visible range
+    const visibleRange = getVisibleRange(editor.visibleRanges)
+    if (!visibleRange)
+      return
+
+    // Convert range to string indices
+    const startPosition = visibleRange.start
+    const endPosition = visibleRange.end
+    const visibleText = editor.document.getText(createRange(startPosition, endPosition))
+
+    // Process only the visible text
+    let text = visibleText
+    const visibleStartOffset = editor.document.offsetAt(startPosition)
+
+    // Run function with offset adjustment
+    const runWithOffset = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
       const style = createStyle(wrapperStyleForBackGround(styleOption))
       // 以免之前的匹配干扰
-      let text = matcher[0]
+      let textSegment = matcher[0]
       for (let index = 1; index < matcher.length; index++) {
         const matchWord = matcher[index]
         if (!matchWord)
@@ -185,15 +215,21 @@ export const { activate, deactivate } = createExtension(() => {
         if (matchWord === matchText)
           break
 
-        text = text.replace(matchWord, '嘿'.repeat(matchWord.length))
+        textSegment = textSegment.replace(matchWord, '嘿'.repeat(matchWord.length))
       }
 
-      const start = matcher.index! + text.indexOf(matchText)
+      // Add offset to match index to account for visible range
+      const start = visibleStartOffset + matcher.index! + textSegment.indexOf(matchText)
       const end = start + (matchText.length)
       const range = createRange(getPosition(start).position, getPosition(end).position)
-      // 如果 cache 中存在一样的缓存就不再设置，也从要还原的缓存中拿走该项
-      const rangeText = getActiveText()!.slice(start, end)
+
+      // Check if range is valid before proceeding
+      if (range.start.line < 0 || range.end.line < 0)
+        return
+
+      const rangeText = fullText.slice(start, end)
       const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
+
       if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
         const clear = clearStyle[cacheKey].get(positionKey)!
         stacks.push(() => clearStyle[cacheKey]?.set(positionKey, clear))
@@ -204,16 +240,7 @@ export const { activate, deactivate } = createExtension(() => {
       }
     }
 
-    // 获取当前光标位置的文本
-    let text = getActiveText()!
-
-    if (!text) {
-      clearStyle[cacheKey]?.forEach((clear, key) => {
-        clear()
-        clearStyle[cacheKey].delete(key)
-      })
-      return
-    }
+    // Process configuration styles for visible text only
     for (const userConfigurationStyle of userConfigurationStyles) {
       for (const color in userConfigurationStyle) {
         let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
@@ -256,7 +283,7 @@ export const { activate, deactivate } = createExtension(() => {
 
                   if (!matchText)
                     continue
-                  run(matchText, matcher, Object.assign({ ...baseOption }, option))
+                  runWithOffset(matchText, matcher, Object.assign({ ...baseOption }, option))
                 }
               }
               else if (isArray(colors)) {
@@ -270,7 +297,7 @@ export const { activate, deactivate } = createExtension(() => {
                   if (!matchText)
                     continue
 
-                  run(matchText, matcher, { ...baseOption, color })
+                  runWithOffset(matchText, matcher, { ...baseOption, color })
                 }
               }
               else if (!colors) {
@@ -296,10 +323,10 @@ export const { activate, deactivate } = createExtension(() => {
                   }
                   text = text.replace(matchWord, '嘿'.repeat(matchWord.length))
                 }
-                const start = matcher.index! + text.indexOf(matchText)
+                const start = visibleStartOffset + matcher.index! + text.indexOf(matchText)
                 const end = start + matchText.length
                 const range = createRange(getPosition(start).position, getPosition(end).position)
-                const rangeText = getActiveText()!.slice(start, end)
+                const rangeText = fullText.slice(start, end)
                 const positionKey: string = [range.start.line, range.start.character, range.end.line, range.end.character, rangeText, JSON.stringify(styleOption)].join('-')
                 const style = createStyle(wrapperStyleForBackGround(styleOption))
                 if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
@@ -350,6 +377,10 @@ export const { activate, deactivate } = createExtension(() => {
       }
     }),
     addEventListener('theme-change', () => updateVStyle(true)),
+    addEventListener('text-visible-change', (e) => {
+      if (e)
+        updateVStyle(false)
+    }),
     registerCommand('vscode-highlight-text.selectTemplate', () => {
       const options = Object.keys(templates)
       if (!options.length)
@@ -384,4 +415,17 @@ function wrapperStyleForBackGround(styleOption: any) {
     }
   }
   return styleOption
+}
+
+function getVisibleRange(visibleRanges: readonly Range[]) {
+  if (!visibleRanges.length)
+    return
+  const range = visibleRanges[0]
+  const start = range.start
+  const lastRange = visibleRanges[visibleRanges.length - 1]
+  const end = lastRange.end
+  return {
+    start,
+    end,
+  }
 }
