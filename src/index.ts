@@ -329,7 +329,7 @@ export const { activate, deactivate } = createExtension(() => {
       clearStyle[cacheKey].delete(key)
     })
     stacks.forEach(add => add())
-  }, 0)
+  }, 300)
 
   updateVStyle()
 
