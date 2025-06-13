@@ -91,13 +91,13 @@
   "devDependencies": {
     "@antfu/eslint-config": "^3.16.0",
     "@rollup/pluginutils": "^5.1.4",
-    "@types/node": "^18.19.86",
+    "@types/node": "^18.19.111",
     "@types/vscode": "1.77.0",
-    "@vscode-use/utils": "^0.1.50",
-    "@vscode/vsce": "^3.3.2",
+    "@vscode-use/utils": "^0.1.58",
+    "@vscode/vsce": "^3.5.0",
     "bumpp": "^9.11.1",
-    "eslint": "^9.24.0",
-    "lazy-js-utils": "^0.1.40",
+    "eslint": "^9.28.0",
+    "lazy-js-utils": "^0.1.44",
     "tsup": "^6.7.0",
     "typescript": "^5.8.3",
     "vitest": "^0.29.8"

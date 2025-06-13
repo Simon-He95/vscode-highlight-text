@@ -156,8 +156,8 @@ export const { activate, deactivate } = createExtension(() => {
 
     if (refresh) {
       Object.keys(clearStyle).forEach((key) => {
+        Array.from(clearStyle[key].values()).forEach(c => c())
         clearStyle[key].clear()
-        delete clearStyle[key]
       })
     }
     else {
@@ -165,7 +165,6 @@ export const { activate, deactivate } = createExtension(() => {
       Object.keys(clearStyle).forEach((key) => {
         if (key !== cacheKey) {
           clearStyle[key].clear()
-          delete clearStyle[key]
         }
       })
     }
@@ -373,7 +372,6 @@ export const { activate, deactivate } = createExtension(() => {
     addEventListener('config-change', (e) => {
       if (e.affectsConfiguration('vscode-highlight-text')) {
         config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
-        updateVStyle(true)
       }
     }),
     addEventListener('theme-change', () => updateVStyle(true)),
@@ -400,6 +398,7 @@ export const { activate, deactivate } = createExtension(() => {
   ]
 }, () => {
   Object.keys(clearStyle).forEach((key) => {
+    // 执行还原
     clearStyle[key].clear()
     delete clearStyle[key]
   })
