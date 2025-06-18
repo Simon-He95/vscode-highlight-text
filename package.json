@@ -79,7 +79,8 @@
   },
   "scripts": {
     "dev": "pnpm build --watch",
-    "test": "vitest",
+    "test": "vitest run --reporter=verbose",
+    "test:watch": "vitest --watch",
     "build": "tsup src/index.ts --external vscode",
     "pack": "vsce package --no-dependencies",
     "lint": "eslint . --cache",
