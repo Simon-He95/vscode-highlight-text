@@ -60,6 +60,6 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm pack
+      - run: pnpm run pack
       - name: Verify extension entrypoint
         run: unzip -l vscode-highlight-text-*.vsix | grep -q 'extension/dist/index.js'
