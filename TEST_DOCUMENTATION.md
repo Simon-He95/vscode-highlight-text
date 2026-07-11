@@ -9,20 +9,20 @@ pnpm check
 The Vitest suite imports production modules directly and covers:
 
 - configuration compilation, malformed settings, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
-- lookarounds, named groups, advisory-only expensive-pattern diagnostics, and full-match `ignoreReg` interval filtering;
+- lookarounds, named groups, advisory diagnostics for main/ignore patterns, and full-match plus target-span `ignoreReg` filtering;
 - Unicode-aware zero-width matching;
 - worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
 - sticky and explicit-empty flag semantics;
 - engine-provided indices for repeated, optional, and lookbehind captures;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
-- document-scoped rule cooldowns and total refresh range/time budgets;
+- document-scoped rule cooldowns, rule-local limit failures, and total refresh range/time budgets;
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
 - initial activation, split editors, visible-editor removal, language close/open changes, Vue TSX detection, theme rebuild, and exclude cleanup;
 - cooldown enforcement across edits and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-cache state, cache generations, and reuse of unchanged slice text inside the worker;
-- deterministic decoration type ordering, batching, reuse, idempotent cleanup, and disposal.
+- per-editor executors and deterministic, transactional decoration type creation, batching, reuse, cleanup, and disposal.
 
 CI additionally:
 

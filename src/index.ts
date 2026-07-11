@@ -126,7 +126,15 @@ export function activate(context: ExtensionContext): void {
   let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
   let shouldProcess = getExcludeFilter()
   const manager = new DecorationManager(compiled.styles)
-  const executor = new RegexExecutor()
+  const executors = new Map<TextEditor, RegexExecutor>()
+  const getExecutor = (editor: TextEditor) => {
+    const existing = executors.get(editor)
+    if (existing)
+      return existing
+    const executor = new RegexExecutor()
+    executors.set(editor, executor)
+    return executor
+  }
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
   const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
 
@@ -153,12 +161,17 @@ export function activate(context: ExtensionContext): void {
       return
     const rules = getRules(compiled, document)
     if (!shouldProcess(document.uri.path) || !editor.visibleRanges.length || !rules.length) {
-      if (isCurrent())
+      if (isCurrent()) {
+        executors.get(editor)?.dispose()
+        executors.delete(editor)
         manager.clear(editor)
+      }
       return
     }
 
     const rangesByStyle = new Map<string, VscodeRange[]>()
+    const preserveStyleIds = new Set<string>()
+    const executor = getExecutor(editor)
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
     let budgetExceeded = false
     for (const slice of getScanSlices(editor)) {
@@ -171,8 +184,10 @@ export function activate(context: ExtensionContext): void {
           budgetExceeded = true
           break
         }
-        if (failures.isDisabled(document, rule.id))
+        if (failures.isDisabled(document, rule.id)) {
+          rule.targets.forEach(target => preserveStyleIds.add(target.styleId))
           continue
+        }
         const maxMatches = Math.max(1, Math.min(
           MAX_MATCHES_PER_RULE,
           Math.ceil(budget.remainingRanges / Math.max(1, rule.targets.length)),
@@ -195,12 +210,13 @@ export function activate(context: ExtensionContext): void {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
+          rule.targets.forEach(target => preserveStyleIds.add(target.styleId))
           if (isRegexExecutionTimeoutError(error)) {
             failures.recordFailure(document, rule.id)
-            warnOnce(`${rule.context}: ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
+            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
           }
           else if (isRegexExecutionLimitError(error)) {
-            budgetExceeded = true
+            failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {
@@ -221,7 +237,7 @@ export function activate(context: ExtensionContext): void {
       return
     }
     if (isCurrent())
-      manager.apply(editor, rangesByStyle)
+      manager.apply(editor, rangesByStyle, preserveStyleIds)
   }
 
   const scheduler = new LatestTaskScheduler<TextEditor>(
@@ -235,6 +251,8 @@ export function activate(context: ExtensionContext): void {
     for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
         scheduler.remove(editor)
+        executors.get(editor)?.dispose()
+        executors.delete(editor)
         manager.clear(editor)
       }
     }
@@ -259,6 +277,8 @@ export function activate(context: ExtensionContext): void {
       for (const editor of window.visibleTextEditors) {
         if (editor.document === document) {
           scheduler.invalidate(editor)
+          executors.get(editor)?.dispose()
+          executors.delete(editor)
           manager.clear(editor)
         }
       }
@@ -283,7 +303,7 @@ export function activate(context: ExtensionContext): void {
       compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
       shouldProcess = getExcludeFilter()
       failures.clear()
-      executor.resetCache()
+      executors.forEach(executor => executor.resetCache())
       warned.clear()
       compiled.warnings.forEach(warnOnce)
       rebuildAndRefresh()
@@ -300,7 +320,8 @@ export function activate(context: ExtensionContext): void {
       dispose: () => {
         disposed = true
         scheduler.dispose()
-        executor.dispose()
+        executors.forEach(executor => executor.dispose())
+        executors.clear()
         manager.dispose()
       },
     },

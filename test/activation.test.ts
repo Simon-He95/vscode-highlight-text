@@ -96,6 +96,7 @@ describe('extension activation orchestration', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     __resetVscodeMock()
   })
 
@@ -144,6 +145,45 @@ describe('extension activation orchestration', () => {
     vi.spyOn(Date, 'now').mockReturnValue(currentTime + 30_001)
     await __events.visibleRanges.fire({ textEditor: editor })
     await waitFor(() => expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 500)).toBe(true))
+
+    disposeContext(context)
+  })
+
+  it('attributes timeout diagnostics to rule execution including ignoreReg', async () => {
+    configuration.rules = {
+      plaintext: {
+        light: {
+          red: { match: ['SAFE'], ignoreReg: ['(a+)+$'] },
+        },
+      },
+    }
+    const editor = createEditor(`${'a'.repeat(20_000)}b SAFE`, 'ignore-timeout')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('rule execution (including ignoreReg)')))
+
+    disposeContext(context)
+  })
+
+  it('skips only an over-limit rule and still applies later rules', async () => {
+    configuration.rules = {
+      plaintext: {
+        light: {
+          red: ['.', 'TARGET'],
+        },
+      },
+    }
+    const editor = createEditor(`${'x'.repeat(1_001)} TARGET`, 'limit')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Main pattern exceeded 1000 matches')))
+    const types = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    const redType = types.find(type => type.options.color === 'red')
+    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(redType, expect.arrayContaining([expect.anything()])))
 
     disposeContext(context)
   })
@@ -215,6 +255,7 @@ describe('extension activation orchestration', () => {
     await __events.theme.fire(window.activeColorTheme)
     await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(4))
     firstTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
 
     editor.setDecorations.mockClear()
     vi.mocked(window.createTextEditorDecorationType).mockClear()

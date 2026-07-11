@@ -128,7 +128,10 @@ function compileStyleRules(
       config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
     ignores = ignorePatterns.flatMap((input) => {
       try {
-        return [compilePattern(input)]
+        const pattern = compilePattern(input)
+        if (!isRegexSafe(new RegExp(pattern.source, pattern.flags)))
+          config.warnings.push(`Potentially expensive ignoreReg for ${context}: ${pattern.source}`)
+        return [pattern]
       }
       catch (error) {
         config.warnings.push(`Invalid ignoreReg for ${context}: ${error instanceof Error ? error.message : String(error)}`)

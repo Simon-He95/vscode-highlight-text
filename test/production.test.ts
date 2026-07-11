@@ -52,9 +52,14 @@ describe('regex configuration', () => {
     expect(isRegexSafe(/(?!test)/)).toBe(true)
     expect(() => compilePattern([nestedPlus, 'm'])).not.toThrow()
 
-    const compiled = compileConfig({ vue: { light: { red: [nestedPlus], blue: ['(ab{2})+'] } } })
-    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(2)
+    const compiled = compileConfig({ vue: { light: {
+      red: [nestedPlus],
+      blue: ['(ab{2})+'],
+      green: { match: ['safe'], ignoreReg: [nestedPlus] },
+    } } })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(3)
     expect(compiled.warnings).toContain(`Potentially expensive regular expression for vue.light.red: ${nestedPlus}`)
+    expect(compiled.warnings).toContain(`Potentially expensive ignoreReg for vue.light.green: ${nestedPlus}`)
   })
 
   it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
@@ -232,6 +237,20 @@ describe('regex execution', () => {
       pattern: { source: 'foo.*bar', flags: 'gd' },
       targetGroups: [0],
       text: 'fooSECRETbar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?<=(foo))bar', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?=(foo))', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foo',
     })).resolves.toEqual([])
     executor.dispose()
   })
@@ -484,6 +503,19 @@ describe('scheduler lifecycle', () => {
 })
 
 describe('decoration lifecycle', () => {
+  it('disposes partially created types when initialization fails', () => {
+    const partial = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => partial as any)
+      .mockImplementationOnce(() => { throw new Error('invalid style') })
+
+    expect(() => new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['a', { color: 'red' }],
+      ['b', { color: 'blue' }],
+    ]))).toThrow('invalid style')
+    expect(partial.dispose).toHaveBeenCalledTimes(1)
+  })
+
   it('reuses types, batches ranges, and never recreates after dispose', () => {
     const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
       ['a', { color: 'red' }],

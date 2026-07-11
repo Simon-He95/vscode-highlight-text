@@ -122,7 +122,7 @@ parentPort.on('message', ({ id, request }) => {
     const results = []
     const collected = collect(regex, text, request.maxMatches, (match) => {
       const fullSpan = match.indices && match.indices[0]
-      if (!fullSpan || overlapsIgnored(fullSpan))
+      if (!fullSpan)
         return
       const spans = request.targetGroups.map((groupIndex) => {
         let index = groupIndex
@@ -140,6 +140,8 @@ parentPort.on('message', ({ id, request }) => {
           return undefined
         return span
       })
+      if (overlapsIgnored(fullSpan) || spans.some(span => span && overlapsIgnored(span)))
+        return
       if (spans.some(Boolean))
         results.push({ spans })
     })
