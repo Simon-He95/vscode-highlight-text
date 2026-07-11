@@ -11,6 +11,13 @@ export interface WorkerRequest {
   text: string
 }
 
+interface WorkerResponse {
+  error?: string
+  errorCode?: string
+  id: number
+  results: MatchResult[]
+}
+
 interface PendingJob {
   onAbort?: () => void
   reject: (error: Error) => void
@@ -74,7 +81,11 @@ parentPort.on('message', ({ id, request }) => {
             ignored.push(span)
         })
         if (collected.truncated)
-          throw new Error('Ignore pattern exceeded ' + maxIgnoreMatches + ' matches')
+          {
+          const error = new Error('Ignore pattern exceeded ' + maxIgnoreMatches + ' matches')
+          error.code = 'IGNORE_LIMIT'
+          throw error
+        }
       }
 
       ignored.sort((a, b) => a[0] - b[0] || a[1] - b[1])
@@ -93,17 +104,26 @@ parentPort.on('message', ({ id, request }) => {
       }
       ignoreCache.set(ignoreKey, mergedIgnored)
     }
-    let maskedText = ''
-    let cursor = 0
-    for (const [start, end] of mergedIgnored) {
-      maskedText += text.slice(cursor, start) + ' '.repeat(end - start)
-      cursor = end
+    function overlapsIgnored(span) {
+      let low = 0
+      let high = mergedIgnored.length
+      while (low < high) {
+        const middle = (low + high) >>> 1
+        if (mergedIgnored[middle][1] <= span[0])
+          low = middle + 1
+        else
+          high = middle
+      }
+      const ignored = mergedIgnored[low]
+      return Boolean(ignored && span[0] < ignored[1] && ignored[0] < span[1])
     }
-    maskedText += text.slice(cursor)
 
     const regex = new RegExp(request.pattern.source, request.pattern.flags)
     const results = []
-    collect(regex, maskedText, request.maxMatches, (match) => {
+    const collected = collect(regex, text, request.maxMatches, (match) => {
+      const fullSpan = match.indices && match.indices[0]
+      if (!fullSpan || overlapsIgnored(fullSpan))
+        return
       const spans = request.targetGroups.map((groupIndex) => {
         let index = groupIndex
         if (index === undefined) {
@@ -123,10 +143,15 @@ parentPort.on('message', ({ id, request }) => {
       if (spans.some(Boolean))
         results.push({ spans })
     })
+    if (collected.truncated) {
+      const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
+      error.code = 'MATCH_LIMIT'
+      throw error
+    }
     parentPort.postMessage({ id, results })
   }
   catch (error) {
-    parentPort.postMessage({ id, error: error instanceof Error ? error.message : String(error) })
+    parentPort.postMessage({ id, error: error instanceof Error ? error.message : String(error), errorCode: error && error.code })
   }
 })
 `
@@ -145,12 +170,23 @@ export class RegexExecutionTimeoutError extends Error {
   }
 }
 
+export class RegexExecutionLimitError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegexExecutionLimitError'
+  }
+}
+
 export function isRegexExecutionAbortedError(error: unknown): error is RegexExecutionAbortedError {
   return error instanceof RegexExecutionAbortedError
 }
 
 export function isRegexExecutionTimeoutError(error: unknown): error is RegexExecutionTimeoutError {
   return error instanceof RegexExecutionTimeoutError
+}
+
+export function isRegexExecutionLimitError(error: unknown): error is RegexExecutionLimitError {
+  return error instanceof RegexExecutionLimitError
 }
 
 export type WorkerFactory = () => WorkerType
@@ -290,7 +326,7 @@ export class RegexExecutor {
     let timer: ReturnType<typeof setTimeout>
     let onError: (error: Error) => void
     let onExit: () => void
-    let onMessage: (message: { error?: string, id: number, results: MatchResult[] }) => void
+    let onMessage: (message: WorkerResponse) => void
 
     const cleanup = () => {
       clearTimeout(timer)
@@ -322,10 +358,15 @@ export class RegexExecutor {
     }
     onError = (error: Error) => finish(error, undefined, true)
     onExit = () => finish(new Error('Regular expression worker stopped unexpectedly'), undefined, true)
-    onMessage = (message: { error?: string, id: number, results: MatchResult[] }) => {
+    onMessage = (message: WorkerResponse) => {
       if (message.id !== id)
         return
-      finish(message.error ? new Error(message.error) : undefined, message.results)
+      const error = message.error
+        ? message.errorCode === 'IGNORE_LIMIT' || message.errorCode === 'MATCH_LIMIT'
+          ? new RegexExecutionLimitError(message.error)
+          : new Error(message.error)
+        : undefined
+      finish(error, message.results)
     }
 
     this.activeCancel = error => finish(error, undefined, true)

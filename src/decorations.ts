@@ -6,7 +6,9 @@ export class DecorationManager {
   private readonly editors = new Set<TextEditor>()
   private readonly types = new Map<string, TextEditorDecorationType>()
 
-  constructor(private styles: Map<string, DecorationRenderOptions>) {}
+  constructor(private styles: Map<string, DecorationRenderOptions>) {
+    this.createTypes()
+  }
 
   apply(editor: TextEditor, rangesByStyle: Map<string, Range[]>): void {
     if (this.disposed)
@@ -16,9 +18,9 @@ export class DecorationManager {
       const options = this.styles.get(styleId)
       if (!options)
         continue
-      if (!this.types.has(styleId))
-        this.types.set(styleId, window.createTextEditorDecorationType(options))
-      editor.setDecorations(this.types.get(styleId)!, ranges)
+      const type = this.types.get(styleId)
+      if (type)
+        editor.setDecorations(type, ranges)
     }
     for (const [styleId, type] of this.types) {
       if (!rangesByStyle.has(styleId))
@@ -43,6 +45,12 @@ export class DecorationManager {
       type.dispose()
     this.types.clear()
     this.styles = styles
+    this.createTypes()
+  }
+
+  private createTypes(): void {
+    for (const [styleId, options] of this.styles)
+      this.types.set(styleId, window.createTextEditorDecorationType(options))
   }
 
   dispose(): void {

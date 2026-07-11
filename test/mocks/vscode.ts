@@ -21,7 +21,9 @@ const activeEditorEvent = createEvent<any>()
 const themeEvent = createEvent<any>()
 const visibleEditorsEvent = createEvent<any[]>()
 const visibleRangesEvent = createEvent<any>()
+const closeDocumentEvent = createEvent<any>()
 const configurationEvent = createEvent<any>()
+const openDocumentEvent = createEvent<any>()
 const textDocumentEvent = createEvent<any>()
 
 export const ColorThemeKind = {
@@ -55,6 +57,8 @@ export const workspace = {
   })),
   onDidChangeConfiguration: configurationEvent.event,
   onDidChangeTextDocument: textDocumentEvent.event,
+  onDidCloseTextDocument: closeDocumentEvent.event,
+  onDidOpenTextDocument: openDocumentEvent.event,
 }
 
 export class Range {
@@ -92,7 +96,9 @@ export const languages = {
 
 export const __events = {
   activeEditor: activeEditorEvent,
+  closeDocument: closeDocumentEvent,
   configuration: configurationEvent,
+  openDocument: openDocumentEvent,
   textDocument: textDocumentEvent,
   theme: themeEvent,
   visibleEditors: visibleEditorsEvent,

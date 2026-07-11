@@ -37,7 +37,7 @@ export class RuleFailureRegistry<DocumentKey extends object> {
 
   constructor(
     readonly cooldownMs: number,
-    private readonly now: () => number = Date.now,
+    private readonly now: () => number = () => Date.now(),
   ) {}
 
   isDisabled(document: DocumentKey, ruleId: string): boolean {

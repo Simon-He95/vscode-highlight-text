@@ -120,7 +120,7 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('does not automatically retry an unchanged timed-out rule', async () => {
+  it('keeps a timed-out rule disabled across edits until its cooldown expires', async () => {
     configuration.rules = {
       plaintext: { light: { red: ['(a+)+$'] } },
     }
@@ -131,7 +131,19 @@ describe('extension activation orchestration', () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
     activate(context)
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('exceeded 500ms')))
-    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 30_000)).toBe(false)
+    setTimeoutSpy.mockClear()
+
+    for (let index = 0; index < 3; index++) {
+      editor.setText(`${'a'.repeat(20_000)}b${index}`)
+      await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    }
+    await new Promise(resolve => setTimeout(resolve, 200))
+    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 500)).toBe(false)
+
+    const currentTime = Date.now()
+    vi.spyOn(Date, 'now').mockReturnValue(currentTime + 30_001)
+    await __events.visibleRanges.fire({ textEditor: editor })
+    await waitFor(() => expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 500)).toBe(true))
 
     disposeContext(context)
   })
@@ -164,26 +176,52 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('clears and reapplies rules when the document language mode changes', async () => {
+    configuration.rules = {
+      plaintext: { light: { red: ['foo'] } },
+      markdown: { light: { blue: ['foo'] } },
+    }
+    const editor = createEditor('foo', 'language')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    editor.setDecorations.mockClear()
+
+    editor.document.isClosed = true
+    await __events.closeDocument.fire(editor.document)
+    expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
+
+    editor.setDecorations.mockClear()
+    editor.document.languageId = 'markdown'
+    editor.document.isClosed = false
+    await __events.openDocument.fire(editor.document)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+
+    disposeContext(context)
+  })
+
   it('clears old decorations on exclude and rebuilds decoration types on theme change', async () => {
     const editor = createEditor('foo')
     window.visibleTextEditors = [editor] as any
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     activate(context)
-    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1))
-    const firstType = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2))
+    const firstTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
 
     window.activeColorTheme = { kind: 2 }
     await __events.theme.fire(window.activeColorTheme)
-    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2))
-    expect(firstType.dispose).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(4))
+    firstTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
 
     editor.setDecorations.mockClear()
     vi.mocked(window.createTextEditorDecorationType).mockClear()
     configuration.exclude = ['**/src/**']
     await __events.configuration.fire({ affectsConfiguration: () => true })
     await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), []))
-    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
 
     window.visibleTextEditors = []
     await __events.visibleEditors.fire([])

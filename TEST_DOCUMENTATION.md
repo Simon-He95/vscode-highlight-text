@@ -9,9 +9,9 @@ pnpm check
 The Vitest suite imports production modules directly and covers:
 
 - configuration compilation, malformed settings, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
-- lookarounds, named groups, advisory-only expensive-pattern diagnostics, and legacy `ignoreReg` masking semantics;
+- lookarounds, named groups, advisory-only expensive-pattern diagnostics, and full-match `ignoreReg` interval filtering;
 - Unicode-aware zero-width matching;
-- worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore-scan truncation;
+- worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
 - sticky and explicit-empty flag semantics;
 - engine-provided indices for repeated, optional, and lookbehind captures;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
@@ -19,10 +19,10 @@ The Vitest suite imports production modules directly and covers:
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
-- initial activation, split editors, visible-editor removal, Vue TSX detection, theme rebuild, and exclude cleanup;
-- no unchanged-document timeout retries and preservation of the last complete snapshot when refresh budgets expire;
+- initial activation, split editors, visible-editor removal, language close/open changes, Vue TSX detection, theme rebuild, and exclude cleanup;
+- cooldown enforcement across edits and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-cache state, cache generations, and reuse of unchanged slice text inside the worker;
-- decoration batching, type reuse, idempotent cleanup, and disposal.
+- deterministic decoration type ordering, batching, reuse, idempotent cleanup, and disposal.
 
 CI additionally:
 

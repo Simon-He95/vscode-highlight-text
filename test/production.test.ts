@@ -212,6 +212,27 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: 'foobar',
     })).resolves.toEqual([{ spans: [[3, 6]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'abc', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '\\s+', flags: 'gd' },
+      targetGroups: [0],
+      text: 'abc',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo\\n', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '^bar', flags: 'gmd' },
+      targetGroups: [0],
+      text: 'foo\nbar',
+    })).resolves.toEqual([{ spans: [[4, 7]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'SECRET', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo.*bar', flags: 'gd' },
+      targetGroups: [0],
+      text: 'fooSECRETbar',
+    })).resolves.toEqual([])
     executor.dispose()
   })
 
@@ -224,6 +245,18 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: `${'x'.repeat(1_001)}TARGET`,
     })).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+    executor.dispose()
+  })
+
+  it('rejects a partial main-pattern result set', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'x', flags: 'gd' },
+      targetGroups: [0],
+      text: 'x'.repeat(11),
+    })).rejects.toThrow('Main pattern exceeded 10 matches')
     executor.dispose()
   })
 
@@ -445,7 +478,8 @@ describe('scheduler lifecycle', () => {
     manager.dispose()
     release()
     await Promise.resolve()
-    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    expect(editor.setDecorations).not.toHaveBeenCalled()
   })
 })
 
@@ -455,6 +489,10 @@ describe('decoration lifecycle', () => {
       ['a', { color: 'red' }],
       ['c', { color: 'blue' }],
     ]))
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
+      [{ color: 'red' }],
+      [{ color: 'blue' }],
+    ])
     const editor = new MockEditor() as any
     for (let iteration = 0; iteration < 100; iteration++) {
       manager.apply(editor, new Map([['a', [range(0, 1), range(2, 3)]], ['c', [range(4, 5)]]]))

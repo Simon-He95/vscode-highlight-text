@@ -6,7 +6,7 @@ import { deepMerge } from 'lazy-js-utils'
 import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
-import { isRegexExecutionAbortedError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
+import { isRegexExecutionAbortedError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
 import { BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
@@ -140,10 +140,12 @@ export function activate(context: ExtensionContext): void {
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
     const documentVersion = document.version
+    const languageId = document.languageId
     const isCurrent = () => task.isCurrent()
       && !disposed
       && editor.document === document
       && document.version === documentVersion
+      && document.languageId === languageId
       && !document.isClosed
       && window.visibleTextEditors.includes(editor)
 
@@ -197,6 +199,10 @@ export function activate(context: ExtensionContext): void {
             failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
           }
+          else if (isRegexExecutionLimitError(error)) {
+            budgetExceeded = true
+            warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
+          }
           else {
             warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -243,11 +249,24 @@ export function activate(context: ExtensionContext): void {
 
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((event) => {
-      if (event.contentChanges.length)
-        failures.clearDocument(event.document)
       for (const editor of window.visibleTextEditors) {
         if (editor.document === event.document && event.contentChanges.length)
           scheduler.schedule(editor)
+      }
+    }),
+    workspace.onDidCloseTextDocument((document) => {
+      failures.clearDocument(document)
+      for (const editor of window.visibleTextEditors) {
+        if (editor.document === document) {
+          scheduler.invalidate(editor)
+          manager.clear(editor)
+        }
+      }
+    }),
+    workspace.onDidOpenTextDocument((document) => {
+      for (const editor of window.visibleTextEditors) {
+        if (editor.document === document)
+          scheduler.schedule(editor, true)
       }
     }),
     window.onDidChangeActiveTextEditor((editor) => {
