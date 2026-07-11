@@ -226,7 +226,7 @@
 
 ### 4. 支持 RegExp 的 flags 传入
   ```md
-   "red": ["[0-9]+","gm"]
+   "red": [["[0-9]+", "gm"]]
    ```
 
 ## Show your style

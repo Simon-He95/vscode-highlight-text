@@ -3,6 +3,7 @@
   "name": "vscode-highlight-text",
   "displayName": "vscode-highlight-text",
   "version": "0.0.49",
+  "packageManager": "pnpm@9.15.9",
   "description": "A VSCode extension to highlight text in various languages like Vue, React, Svelte, Solid, Astro, and Markdown.",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
@@ -58,7 +59,19 @@
             "solid": {},
             "markdown": {}
           },
-          "description": "Highlight styles for Vue, React, Svelte, Solid, Astro, and Markdown."
+          "description": "Highlight styles for Vue, React, Svelte, Solid, Astro, and Markdown.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "light": {
+                "$ref": "#/definitions/vscode-highlight-text.styles"
+              },
+              "dark": {
+                "$ref": "#/definitions/vscode-highlight-text.styles"
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "vscode-highlight-text.exclude": {
           "type": "array",
@@ -66,7 +79,91 @@
             "**/dist/**",
             "**/node_modules/**"
           ],
-          "description": "Directories to be skipped."
+          "description": "Directories to be skipped.",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "definitions": {
+        "vscode-highlight-text.pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          ]
+        },
+        "vscode-highlight-text.style": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/vscode-highlight-text.pattern"
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "match"
+              ],
+              "properties": {
+                "match": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/vscode-highlight-text.pattern"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/vscode-highlight-text.pattern"
+                      }
+                    }
+                  ]
+                },
+                "colors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "matchCss": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "ignoreReg": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/vscode-highlight-text.pattern"
+                  }
+                },
+                "background": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        "vscode-highlight-text.styles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/vscode-highlight-text.style"
+          }
         }
       }
     },
@@ -82,6 +179,8 @@
     "test": "vitest run --reporter=verbose",
     "test:watch": "vitest --watch",
     "build": "tsup src/index.ts --external vscode",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "vscode:prepublish": "pnpm check && pnpm build",
     "pack": "vsce package --no-dependencies",
     "lint": "eslint . --cache",
     "lint:fix": "eslint . --fix",

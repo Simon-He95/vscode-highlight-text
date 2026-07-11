@@ -5,3 +5,16 @@ test
 .vscode
 assets
 scripts
+.eslintcache
+.gitignore
+*.tgz
+*.vsix
+*.md
+!README.md
+pnpm-lock.yaml
+pnpm-workspace.yaml
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+eslint.config.js
+TEST_DOCUMENTATION.md

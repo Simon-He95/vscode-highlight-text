@@ -1,16 +1,22 @@
 // Mock VSCode API for testing
+import { vi } from 'vitest'
+
 export const window = {
   activeTextEditor: null,
-  showWarningMessage: () => Promise.resolve(),
-  showErrorMessage: () => Promise.resolve(),
-  showInformationMessage: () => Promise.resolve(),
+  createTextEditorDecorationType: vi.fn((options: any) => ({
+    options,
+    dispose: vi.fn(),
+  })),
+  showWarningMessage: vi.fn(() => Promise.resolve()),
+  showErrorMessage: vi.fn(() => Promise.resolve()),
+  showInformationMessage: vi.fn(() => Promise.resolve()),
 }
 
 export const workspace = {
-  getConfiguration: () => ({
-    get: () => ({}),
-    update: () => Promise.resolve(),
-  }),
+  getConfiguration: vi.fn(() => ({
+    get: vi.fn(() => ({})),
+    update: vi.fn(() => Promise.resolve()),
+  })),
 }
 
 export class Range {
@@ -29,18 +35,17 @@ export const DecorationRangeBehavior = {
 }
 
 export const commands = {
-  registerCommand: () => ({ dispose: () => {} }),
+  registerCommand: vi.fn(() => ({ dispose: vi.fn() })),
 }
 
 export const languages = {
-  createDiagnosticCollection: () => ({
-    set: () => {},
-    clear: () => {},
-    dispose: () => {},
-  }),
+  createDiagnosticCollection: vi.fn(() => ({
+    set: vi.fn(),
+    clear: vi.fn(),
+    dispose: vi.fn(),
+  })),
 }
 
-// Mock other VSCode APIs as needed
 export default {
   window,
   workspace,

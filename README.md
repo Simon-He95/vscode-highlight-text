@@ -224,7 +224,7 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 
 ### 4. Support RegExp flags passing
   ```md
-   "red": ["[0-9]+","gm"]
+   "red": [["[0-9]+", "gm"]]
    ```
 
 ## Show your style
