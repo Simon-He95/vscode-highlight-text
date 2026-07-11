@@ -8,8 +8,8 @@ pnpm check
 
 The Vitest suite imports production modules directly and covers:
 
-- configuration compilation, malformed settings, RegExp flags, and legacy tuple compatibility;
-- lookarounds, named groups, and advisory-only expensive-pattern diagnostics;
+- configuration compilation, malformed settings, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
+- lookarounds, named groups, advisory-only expensive-pattern diagnostics, and legacy `ignoreReg` masking semantics;
 - Unicode-aware zero-width matching;
 - worker-enforced timeout, active cancellation, queued cancellation, and constructor/postMessage failure recovery;
 - sticky and explicit-empty flag semantics;
@@ -19,6 +19,8 @@ The Vitest suite imports production modules directly and covers:
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
+- initial activation, split editors, visible-editor removal, theme rebuild, and exclude cleanup;
+- bounded warning state and reuse of unchanged slice text inside the worker;
 - decoration batching, type reuse, idempotent cleanup, and disposal.
 
 CI additionally:

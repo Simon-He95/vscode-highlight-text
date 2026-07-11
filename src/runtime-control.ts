@@ -3,6 +3,35 @@ export interface RuleFailureState {
   failures: number
 }
 
+export class BoundedSet<Value> {
+  private readonly values = new Set<Value>()
+
+  constructor(readonly capacity: number) {
+    if (capacity < 1)
+      throw new Error('BoundedSet capacity must be positive')
+  }
+
+  get size(): number {
+    return this.values.size
+  }
+
+  add(value: Value): boolean {
+    if (this.values.has(value))
+      return false
+    if (this.values.size >= this.capacity) {
+      const oldest = this.values.values().next()
+      if (!oldest.done)
+        this.values.delete(oldest.value)
+    }
+    this.values.add(value)
+    return true
+  }
+
+  clear(): void {
+    this.values.clear()
+  }
+}
+
 export class RuleFailureRegistry<DocumentKey extends object> {
   private entries = new WeakMap<DocumentKey, Map<string, RuleFailureState>>()
 

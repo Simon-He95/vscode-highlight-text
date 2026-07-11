@@ -106,12 +106,10 @@ function compileStyleRules(
   if (option) {
     patterns = normalizePatterns(option.match)
   }
-  else if (isPatternTuple(raw)) {
-    patterns = [raw]
-    config.warnings.push(`Legacy pattern tuple for ${context}: wrap it in an array, for example [["pattern", "gm"]]`)
-  }
   else {
     patterns = normalizePatterns(raw)
+    if (isPatternTuple(raw))
+      config.warnings.push(`Ambiguous rule for ${context}: interpreted as two patterns; wrap it in an array, for example [["pattern", "gm"]], to pass flags`)
   }
   if (!patterns.length) {
     config.warnings.push(`Invalid match patterns for ${context}`)

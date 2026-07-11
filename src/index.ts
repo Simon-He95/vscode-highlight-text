@@ -7,7 +7,7 @@ import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vs
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
 import { isRegexExecutionAbortedError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
-import { RefreshBudget, RuleFailureRegistry } from './runtime-control'
+import { BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
 
@@ -16,6 +16,7 @@ const MAX_MATCHES_PER_RULE = 1_000
 const MAX_TOTAL_RANGES = 10_000
 const MAX_TOTAL_SCAN_TIME = 1_000
 const REGEX_FAILURE_COOLDOWN = 30_000
+const MAX_REMEMBERED_WARNINGS = 100
 const OVERSCAN_LINES = 20
 const UPDATE_DELAY = 100
 
@@ -123,12 +124,11 @@ export function activate(context: ExtensionContext): void {
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
   const cooldownTimers = new Map<TextDocument, ReturnType<typeof setTimeout>>()
   let scheduleCooldownRetry: (document: TextDocument) => void = () => {}
-  const warned = new Set<string>()
+  const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
 
   const warnOnce = (warning: string) => {
-    if (disposed || warned.has(warning))
+    if (disposed || !warned.add(warning))
       return
-    warned.add(warning)
     void window.showWarningMessage(`vscode-highlight-text: ${warning}`)
   }
   compiled.warnings.forEach(warnOnce)

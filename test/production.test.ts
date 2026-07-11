@@ -1,12 +1,13 @@
 /* eslint-disable regexp/no-misleading-capturing-group, regexp/no-super-linear-backtracking */
 import type { DecorationRenderOptions, Range } from 'vscode'
+import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { window } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, RegexExecutor } from '../src/regex-worker'
-import { RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
+import { BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
 import { LatestTaskScheduler } from '../src/scheduler'
 
 class MockEditor {
@@ -47,7 +48,7 @@ describe('regex configuration', () => {
     expect(compiled.warnings).toContain(`Potentially expensive regular expression for vue.light.red: ${nestedPlus}`)
   })
 
-  it('supports pattern strings, tuples, arrays, and the legacy README shorthand', () => {
+  it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
     const compiled = compileConfig({
       vue: {
         light: {
@@ -63,9 +64,10 @@ describe('regex configuration', () => {
       { source: 'bar', flags: 'gid' },
       { source: 'baz', flags: 'mgd' },
       { source: 'qux', flags: 'gmd' },
-      { source: '[0-9]+', flags: 'gid' },
+      { source: '[0-9]+', flags: 'gmd' },
+      { source: 'gi', flags: 'gmd' },
     ])
-    expect(compiled.warnings).toContainEqual(expect.stringContaining('Legacy pattern tuple for vue.light.legacy'))
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Ambiguous rule for vue.light.legacy'))
   })
 
   it('keeps explicit match arrays unambiguous', () => {
@@ -187,6 +189,20 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: 'foo',
     })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo(bar)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'bar', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foobar',
+    })).resolves.toEqual([{ spans: [[3, 6]] }])
     executor.dispose()
   })
 
@@ -218,6 +234,28 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: 'baaa',
     })).resolves.toEqual([{ spans: [[1, 4]] }])
+    executor.dispose()
+  })
+
+  it('sends unchanged slice text to a worker only once', async () => {
+    const messages: any[] = []
+    class FakeWorker extends EventEmitter {
+      postMessage(message: any) {
+        messages.push(message)
+        queueMicrotask(() => this.emit('message', { id: message.id, results: [] }))
+      }
+
+      terminate = vi.fn(async () => 0)
+      unref = vi.fn()
+    }
+    const executor = new RegexExecutor(500, () => new FakeWorker() as any)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'same text' }
+    await executor.execute(request)
+    await executor.execute(request)
+    await executor.execute({ ...request, text: 'different text' })
+    expect(messages[0].request.text).toBe('same text')
+    expect(messages[1].request).not.toHaveProperty('text')
+    expect(messages[2].request.text).toBe('different text')
     executor.dispose()
   })
 
@@ -277,6 +315,16 @@ describe('regex execution', () => {
 })
 
 describe('runtime controls', () => {
+  it('bounds remembered warning keys', () => {
+    const values = new BoundedSet<string>(2)
+    expect(values.add('first')).toBe(true)
+    expect(values.add('first')).toBe(false)
+    values.add('second')
+    values.add('third')
+    expect(values.size).toBe(2)
+    expect(values.add('first')).toBe(true)
+  })
+
   it('isolates rule cooldowns by document and restores them after expiry', () => {
     let now = 0
     const registry = new RuleFailureRegistry<object>(1_000, () => now)

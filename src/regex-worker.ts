@@ -20,6 +20,8 @@ interface PendingJob {
 
 const WORKER_SOURCE = String.raw`
 const { parentPort } = require('node:worker_threads')
+let cachedText
+let ignoreCache = new Map()
 
 function advanceStringIndex(text, index, unicode) {
   if (!unicode)
@@ -45,19 +47,49 @@ function collect(regex, text, limit, onMatch) {
 
 parentPort.on('message', ({ id, request }) => {
   try {
-    const ignored = []
-    for (const pattern of request.ignores) {
-      const regex = new RegExp(pattern.source, pattern.flags)
-      collect(regex, request.text, request.maxMatches, (match) => {
-        const span = match.indices && match.indices[0]
-        if (span)
-          ignored.push(span)
-      })
+    if (request.text !== undefined) {
+      cachedText = request.text
+      ignoreCache = new Map()
     }
+    if (cachedText === undefined)
+      throw new Error('Regular expression worker text is not initialized')
+    const text = cachedText
+    const maxIgnoreMatches = Math.max(request.maxMatches, 1000)
+    const ignoreKey = JSON.stringify([request.ignores, maxIgnoreMatches])
+    let mergedIgnored = ignoreCache.get(ignoreKey)
+    if (!mergedIgnored) {
+      const ignored = []
+      for (const pattern of request.ignores) {
+        const regex = new RegExp(pattern.source, pattern.flags)
+        collect(regex, text, maxIgnoreMatches, (match) => {
+          const span = match.indices && match.indices[0]
+          if (span)
+            ignored.push(span)
+        })
+      }
+
+      ignored.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+      mergedIgnored = []
+      for (const span of ignored) {
+        const previous = mergedIgnored[mergedIgnored.length - 1]
+        if (previous && span[0] <= previous[1])
+          previous[1] = Math.max(previous[1], span[1])
+        else
+          mergedIgnored.push([...span])
+      }
+      ignoreCache.set(ignoreKey, mergedIgnored)
+    }
+    let maskedText = ''
+    let cursor = 0
+    for (const [start, end] of mergedIgnored) {
+      maskedText += text.slice(cursor, start) + ' '.repeat(end - start)
+      cursor = end
+    }
+    maskedText += text.slice(cursor)
 
     const regex = new RegExp(request.pattern.source, request.pattern.flags)
     const results = []
-    collect(regex, request.text, request.maxMatches, (match) => {
+    collect(regex, maskedText, request.maxMatches, (match) => {
       const spans = request.targetGroups.map((groupIndex) => {
         let index = groupIndex
         if (index === undefined) {
@@ -71,8 +103,6 @@ parentPort.on('message', ({ id, request }) => {
         }
         const span = match.indices && match.indices[index]
         if (!span || span[0] < 0)
-          return undefined
-        if (ignored.some(([start, end]) => span[0] < end && start < span[1]))
           return undefined
         return span
       })
@@ -122,6 +152,7 @@ export class RegexExecutor {
   private nextId = 0
   private readonly pending: PendingJob[] = []
   private worker?: WorkerType
+  private workerText?: string
 
   constructor(
     private readonly timeoutMs = 500,
@@ -158,6 +189,7 @@ export class RegexExecutor {
     }
     void this.worker?.terminate()
     this.worker = undefined
+    this.workerText = undefined
   }
 
   private cancel(job: PendingJob): void {
@@ -179,13 +211,18 @@ export class RegexExecutor {
       worker = this.workerFactory()
       worker.unref()
       worker.on('error', () => {
-        if (this.worker === worker)
+        if (this.worker === worker) {
           this.worker = undefined
+          this.workerText = undefined
+        }
       })
       worker.on('exit', () => {
-        if (this.worker === worker)
+        if (this.worker === worker) {
           this.worker = undefined
+          this.workerText = undefined
+        }
       })
+      this.workerText = undefined
       this.worker = worker
       return worker
     }
@@ -216,6 +253,7 @@ export class RegexExecutor {
       this.active = undefined
       this.activeCancel = undefined
       this.worker = undefined
+      this.workerText = undefined
       job.reject(error instanceof Error ? error : new Error(String(error)))
       queueMicrotask(() => this.drain())
     }
@@ -251,8 +289,10 @@ export class RegexExecutor {
       settled = true
       cleanup()
       if (terminate) {
-        if (this.worker === worker)
+        if (this.worker === worker) {
           this.worker = undefined
+          this.workerText = undefined
+        }
         void worker.terminate()
       }
       if (error)
@@ -278,7 +318,10 @@ export class RegexExecutor {
     worker.once('error', onError)
     worker.once('exit', onExit)
     try {
-      worker.postMessage({ id, request: job.request })
+      const { text, ...rest } = job.request
+      const request = this.workerText === text ? rest : job.request
+      worker.postMessage({ id, request })
+      this.workerText = text
     }
     catch (error) {
       finish(error instanceof Error ? error : new Error(String(error)), undefined, true)
