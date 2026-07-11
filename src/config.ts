@@ -10,7 +10,21 @@ const MAX_RULES_PER_MODE = 1000
 const MAX_TARGETS_PER_RULE = 100
 const MAX_TOTAL_RULES = 5000
 const MAX_TOTAL_STYLES = 1000
+const MAX_WARNINGS = 100
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
+
+function createWarnings(): string[] {
+  const warnings: string[] = []
+  Object.defineProperty(warnings, 'push', {
+    configurable: true,
+    value: (...items: string[]) => Array.prototype.push.apply(
+      warnings,
+      items.slice(0, Math.max(0, MAX_WARNINGS - warnings.length)),
+    ),
+    writable: true,
+  })
+  return warnings
+}
 
 function stableSerialize(value: unknown): string {
   if (Array.isArray(value))
@@ -148,9 +162,11 @@ function compileStyleRules(
       config.warnings.push(`Invalid ignoreReg for ${context}: at most ${MAX_IGNORE_PATTERNS_PER_RULE} patterns are allowed`)
       return []
     }
-    const ignorePatterns = normalizePatterns(option.ignoreReg)
-    if (!ignorePatterns.length && option.ignoreReg !== undefined)
+    if (!Array.isArray(option.ignoreReg)) {
       config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
+      return []
+    }
+    const ignorePatterns = normalizePatterns(option.ignoreReg)
     ignores = ignorePatterns.flatMap((input) => {
       try {
         const pattern = compilePattern(input)
@@ -185,17 +201,17 @@ function compileStyleRules(
   })
 }
 
-function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig): CompiledRule[] {
+function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig, maxRules = MAX_RULES_PER_MODE): CompiledRule[] {
   if (!isStyleObject(raw))
     return []
   const rules: CompiledRule[] = []
   for (const [color, value] of Object.entries(raw)) {
-    if (rules.length >= MAX_RULES_PER_MODE) {
+    if (rules.length >= maxRules) {
       config.warnings.push(`Too many rules for ${language}.${mode}: at most ${MAX_RULES_PER_MODE} rules are allowed`)
       break
     }
     try {
-      const remaining = MAX_RULES_PER_MODE - rules.length
+      const remaining = maxRules - rules.length
       rules.push(...compileStyleRules(color, value, `${language}.${mode}.${color}`, config).slice(0, remaining))
     }
     catch (error) {
@@ -209,39 +225,60 @@ export function compileConfig(raw: unknown): CompiledConfig {
   const result: CompiledConfig = {
     languages: new Map(),
     styles: new Map(),
-    warnings: [],
+    warnings: createWarnings(),
   }
   if (!isStyleObject(raw)) {
     result.warnings.push('vscode-highlight-text.rules must be an object')
     return result
   }
 
+  let compiledRuleCount = 0
+  let processedLanguageKeys = 0
   for (const [languageKey, modes] of Object.entries(raw)) {
+    if (processedLanguageKeys >= MAX_LANGUAGES || compiledRuleCount >= MAX_TOTAL_RULES) {
+      result.warnings.push('Configuration compilation budget was reached; remaining language keys were skipped')
+      break
+    }
+    processedLanguageKeys++
     if (!isStyleObject(modes)) {
       result.warnings.push(`Rules for ${languageKey} must be an object`)
       continue
     }
-    const compiled = {
-      dark: compileMode(modes.dark, languageKey, 'dark', result),
-      light: compileMode(modes.light, languageKey, 'light', result),
+    let availableLanguages = MAX_LANGUAGES - result.languages.size
+    const languages = languageKey.split('|').map(item => item.trim()).filter(Boolean).filter((language) => {
+      if (result.languages.has(language))
+        return true
+      if (availableLanguages <= 0)
+        return false
+      availableLanguages--
+      return true
+    })
+    if (!languages.length) {
+      result.warnings.push(`Too many languages: at most ${MAX_LANGUAGES} languages are allowed`)
+      continue
     }
-    for (const language of languageKey.split('|').map(item => item.trim()).filter(Boolean)) {
+
+    const darkLimit = Math.min(MAX_RULES_PER_MODE, MAX_TOTAL_RULES - compiledRuleCount)
+    const dark = compileMode(modes.dark, languageKey, 'dark', result, darkLimit)
+    compiledRuleCount += dark.length
+    const lightLimit = Math.min(MAX_RULES_PER_MODE, MAX_TOTAL_RULES - compiledRuleCount)
+    const light = compileMode(modes.light, languageKey, 'light', result, lightLimit)
+    compiledRuleCount += light.length
+    const compiled = { dark, light }
+
+    for (const language of languages) {
       const existing = result.languages.get(language)
-      if (!existing && result.languages.size >= MAX_LANGUAGES) {
-        result.warnings.push(`Too many languages: at most ${MAX_LANGUAGES} languages are allowed`)
-        break
-      }
       if (!existing) {
         result.languages.set(language, compiled)
         continue
       }
-      const dark = [...compiled.dark, ...existing.dark]
-      const light = [...compiled.light, ...existing.light]
-      if (dark.length > MAX_RULES_PER_MODE || light.length > MAX_RULES_PER_MODE)
+      const mergedDark = [...compiled.dark, ...existing.dark]
+      const mergedLight = [...compiled.light, ...existing.light]
+      if (mergedDark.length > MAX_RULES_PER_MODE || mergedLight.length > MAX_RULES_PER_MODE)
         result.warnings.push(`Too many merged rules for ${language}: at most ${MAX_RULES_PER_MODE} rules per mode are allowed`)
       result.languages.set(language, {
-        dark: dark.slice(0, MAX_RULES_PER_MODE),
-        light: light.slice(0, MAX_RULES_PER_MODE),
+        dark: mergedDark.slice(0, MAX_RULES_PER_MODE),
+        light: mergedLight.slice(0, MAX_RULES_PER_MODE),
       })
     }
   }

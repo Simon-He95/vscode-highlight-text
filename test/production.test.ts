@@ -105,12 +105,13 @@ describe('regex configuration', () => {
       .reduce((total, modes) => total + modes.dark.length + modes.light.length, 0)
     expect(totalRules).toBe(5_000)
     expect(compiled.styles.size).toBe(5)
-    expect(compiled.warnings).toContainEqual(expect.stringContaining('5000 total language-mode rule entries'))
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('compilation budget was reached'))
 
     const tooManyLanguages = compileConfig(Object.fromEntries(
       Array.from({ length: 101 }, (_, index) => [`language${index}`, { light: { red: [`p${index}`] } }]),
     ))
     expect(tooManyLanguages.languages.size).toBe(100)
+    expect(tooManyLanguages.warnings.length).toBeLessThanOrEqual(100)
   })
 
   it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
@@ -138,6 +139,12 @@ describe('regex configuration', () => {
   it('keeps explicit match arrays unambiguous', () => {
     const compiled = compileConfig({ vue: { light: { red: { match: ['foo', 'gm'] } } } })
     expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern.source)).toEqual(['foo', 'gm'])
+  })
+
+  it('accepts an empty ignoreReg without warnings', () => {
+    const compiled = compileConfig({ vue: { light: { red: { match: ['foo'], ignoreReg: [] } } } })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(1)
+    expect(compiled.warnings).toEqual([])
   })
 
   it('preserves React aliases across JSX and TSX', () => {

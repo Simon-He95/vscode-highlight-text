@@ -187,6 +187,32 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('does not commit a snapshot when the visible scan exceeds its character budget', async () => {
+    const editor = createEditor('foo', 'scan-budget')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    editor.setDecorations.mockClear()
+    editor.setText(`foo${'x'.repeat(200_001)}`)
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Visible scan exceeds 200000 characters')))
+    expect(editor.setDecorations).not.toHaveBeenCalled()
+    disposeContext(context)
+  })
+
+  it('limits configuration warning toasts', () => {
+    configuration.rules = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [
+      `language${index}`,
+      { light: { red: { match: [] } } },
+    ]))
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+    activate(context)
+    expect(window.showWarningMessage).toHaveBeenCalledTimes(5)
+    disposeContext(context)
+  })
+
   it('attributes timeout diagnostics to rule execution including ignoreReg', async () => {
     configuration.rules = {
       plaintext: {
@@ -202,6 +228,25 @@ describe('extension activation orchestration', () => {
     activate(context)
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('rule execution (including ignoreReg)')))
 
+    disposeContext(context)
+  })
+
+  it('isolates a span-budget rule and still applies later rules', async () => {
+    const groups = Array.from({ length: 100 }, () => '(x)').join('')
+    configuration.rules = {
+      plaintext: { light: {
+        red: { match: [groups], colors: Array.from({ length: 100 }, () => 'red') },
+        blue: ['TARGET'],
+      } },
+    }
+    const editor = createEditor(`${'x'.repeat(10_100)} TARGET`, 'span-budget')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('span budget')), 3_000)
+    const blueType = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).find(type => type.options.color === 'blue')
+    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(blueType, expect.arrayContaining([expect.anything()])))
     disposeContext(context)
   })
 

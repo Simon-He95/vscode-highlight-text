@@ -45,6 +45,11 @@ interface RuleSnapshot {
   rangesByStyle: Map<string, VscodeRange[]>
 }
 
+interface ScanPlan {
+  complete: boolean
+  slices: ScanSlice[]
+}
+
 interface ScanSlice {
   end: number
   start: number
@@ -56,7 +61,7 @@ function isDarkTheme(): boolean {
     || window.activeColorTheme.kind === ColorThemeKind.HighContrast
 }
 
-function getScanSlices(editor: TextEditor): ScanSlice[] {
+function getScanSlices(editor: TextEditor): ScanPlan {
   const document = editor.document
   const ranges = editor.visibleRanges
     .map((visible) => {
@@ -77,14 +82,17 @@ function getScanSlices(editor: TextEditor): ScanSlice[] {
       merged.push({ ...range })
   }
 
-  let budget = MAX_SCAN_SIZE
-  return merged.flatMap(({ start, end }) => {
-    if (budget <= 0)
-      return []
-    const limitedEnd = Math.min(end, start + budget)
-    budget -= limitedEnd - start
-    return [{ start, end: limitedEnd, text: document.getText(new Range(document.positionAt(start), document.positionAt(limitedEnd))) }]
-  })
+  const totalSize = merged.reduce((total, range) => total + range.end - range.start, 0)
+  if (totalSize > MAX_SCAN_SIZE)
+    return { complete: false, slices: [] }
+  return {
+    complete: true,
+    slices: merged.map(({ start, end }) => ({
+      start,
+      end,
+      text: document.getText(new Range(document.positionAt(start), document.positionAt(end))),
+    })),
+  }
 }
 
 async function scanRule(
@@ -178,10 +186,14 @@ export function activate(context: ExtensionContext): void {
   }
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
   const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
+  let warningToastCount = 0
 
   const warnOnce = (warning: string) => {
     if (disposed || !warned.add(warning))
       return
+    if (warningToastCount >= 5)
+      return
+    warningToastCount++
     void window.showWarningMessage(`vscode-highlight-text: ${warning}`)
   }
   compiled.warnings.forEach(warnOnce)
@@ -220,6 +232,12 @@ export function activate(context: ExtensionContext): void {
       return
     }
 
+    const scanPlan = getScanSlices(editor)
+    if (!scanPlan.complete) {
+      warnOnce(`Visible scan exceeds ${MAX_SCAN_SIZE} characters in ${document.uri.fsPath}; previous complete highlights were preserved`)
+      return
+    }
+
     const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
     const scannedSnapshots = new Map<string, Map<string, VscodeRange[]>>()
     const scannedRangeKeys = new Set<string>()
@@ -227,7 +245,7 @@ export function activate(context: ExtensionContext): void {
     const executor = getExecutor(editor)
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
     let budgetExceeded = false
-    for (const slice of getScanSlices(editor)) {
+    for (const slice of scanPlan.slices) {
       if (!isCurrent())
         return
       for (const rule of rules) {
@@ -267,7 +285,9 @@ export function activate(context: ExtensionContext): void {
             return
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
           if (isRegexExecutionBudgetError(error)) {
-            budgetExceeded = true
+            failedRuleIds.add(rule.id)
+            failures.recordFailure(document, rule.id)
+            warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {
             failedRuleIds.add(rule.id)
@@ -405,6 +425,7 @@ export function activate(context: ExtensionContext): void {
       failures.clear()
       executors.forEach(executor => executor.resetCache())
       warned.clear()
+      warningToastCount = 0
       compiled.warnings.forEach(warnOnce)
       previousManager.dispose()
       refreshVisibleEditors(true)
