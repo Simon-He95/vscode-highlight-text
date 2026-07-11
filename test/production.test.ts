@@ -3,6 +3,7 @@ import type { DecorationRenderOptions, Range } from 'vscode'
 import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { window } from 'vscode'
+import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
@@ -26,6 +27,14 @@ afterEach(() => {
 })
 
 describe('regex configuration', () => {
+  it('requires nested tuples for flags in the manifest schema', () => {
+    const definitions = packageJson.contributes.configuration.definitions as any
+    const match = definitions['vscode-highlight-text.style'].anyOf[1].properties.match
+    expect(match.anyOf[0]).toEqual({ type: 'string' })
+    expect(match.anyOf[1].items.$ref).toBe('#/definitions/vscode-highlight-text.pattern')
+    expect(match.anyOf[0]).not.toHaveProperty('$ref')
+  })
+
   it('normalizes flags and accepts JavaScript assertions and named groups', () => {
     expect(normalizeFlags('m')).toBe('mgd')
     expect(normalizeFlags('dg')).toBe('dg')
@@ -206,6 +215,18 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('rejects a rule when its ignore scan is truncated', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'x|TARGET', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${'x'.repeat(1_001)}TARGET`,
+    })).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+    executor.dispose()
+  })
+
   it('preserves the first participating capture by default', async () => {
     const executor = new RegexExecutor(500)
     await expect(executor.execute({
@@ -253,9 +274,13 @@ describe('regex execution', () => {
     await executor.execute(request)
     await executor.execute(request)
     await executor.execute({ ...request, text: 'different text' })
+    executor.resetCache()
+    await executor.execute({ ...request, text: 'different text' })
     expect(messages[0].request.text).toBe('same text')
     expect(messages[1].request).not.toHaveProperty('text')
     expect(messages[2].request.text).toBe('different text')
+    expect(messages[3].request).not.toHaveProperty('text')
+    expect(messages[3].request.cacheGeneration).toBe(messages[2].request.cacheGeneration + 1)
     executor.dispose()
   })
 

@@ -11,7 +11,7 @@ The Vitest suite imports production modules directly and covers:
 - configuration compilation, malformed settings, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
 - lookarounds, named groups, advisory-only expensive-pattern diagnostics, and legacy `ignoreReg` masking semantics;
 - Unicode-aware zero-width matching;
-- worker-enforced timeout, active cancellation, queued cancellation, and constructor/postMessage failure recovery;
+- worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore-scan truncation;
 - sticky and explicit-empty flag semantics;
 - engine-provided indices for repeated, optional, and lookbehind captures;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
@@ -19,8 +19,9 @@ The Vitest suite imports production modules directly and covers:
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
-- initial activation, split editors, visible-editor removal, theme rebuild, and exclude cleanup;
-- bounded warning state and reuse of unchanged slice text inside the worker;
+- initial activation, split editors, visible-editor removal, Vue TSX detection, theme rebuild, and exclude cleanup;
+- no unchanged-document timeout retries and preservation of the last complete snapshot when refresh budgets expire;
+- bounded warning/ignore-cache state, cache generations, and reuse of unchanged slice text inside the worker;
 - decoration batching, type reuse, idempotent cleanup, and disposal.
 
 CI additionally:

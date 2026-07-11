@@ -3,6 +3,7 @@ import type { CompiledPattern, MatchResult } from './type'
 import { Worker } from 'node:worker_threads'
 
 export interface WorkerRequest {
+  cacheGeneration?: number
   ignores: CompiledPattern[]
   maxMatches: number
   pattern: CompiledPattern
@@ -22,6 +23,7 @@ const WORKER_SOURCE = String.raw`
 const { parentPort } = require('node:worker_threads')
 let cachedText
 let ignoreCache = new Map()
+let cachedGeneration = -1
 
 function advanceStringIndex(text, index, unicode) {
   if (!unicode)
@@ -43,12 +45,17 @@ function collect(regex, text, limit, onMatch) {
     if (match.index === regex.lastIndex)
       regex.lastIndex = advanceStringIndex(text, regex.lastIndex, regex.unicode || regex.unicodeSets)
   }
+  return { count, truncated: count === limit && regex.exec(text) !== null }
 }
 
 parentPort.on('message', ({ id, request }) => {
   try {
     if (request.text !== undefined) {
       cachedText = request.text
+      ignoreCache = new Map()
+    }
+    if (request.cacheGeneration !== cachedGeneration) {
+      cachedGeneration = request.cacheGeneration
       ignoreCache = new Map()
     }
     if (cachedText === undefined)
@@ -61,11 +68,13 @@ parentPort.on('message', ({ id, request }) => {
       const ignored = []
       for (const pattern of request.ignores) {
         const regex = new RegExp(pattern.source, pattern.flags)
-        collect(regex, text, maxIgnoreMatches, (match) => {
+        const collected = collect(regex, text, maxIgnoreMatches, (match) => {
           const span = match.indices && match.indices[0]
           if (span)
             ignored.push(span)
         })
+        if (collected.truncated)
+          throw new Error('Ignore pattern exceeded ' + maxIgnoreMatches + ' matches')
       }
 
       ignored.sort((a, b) => a[0] - b[0] || a[1] - b[1])
@@ -76,6 +85,11 @@ parentPort.on('message', ({ id, request }) => {
           previous[1] = Math.max(previous[1], span[1])
         else
           mergedIgnored.push([...span])
+      }
+      if (ignoreCache.size >= 100) {
+        const oldest = ignoreCache.keys().next()
+        if (!oldest.done)
+          ignoreCache.delete(oldest.value)
       }
       ignoreCache.set(ignoreKey, mergedIgnored)
     }
@@ -148,6 +162,7 @@ export function createRegexWorker(): WorkerType {
 export class RegexExecutor {
   private active?: PendingJob
   private activeCancel?: (error: Error) => void
+  private cacheGeneration = 0
   private disposed = false
   private nextId = 0
   private readonly pending: PendingJob[] = []
@@ -161,6 +176,10 @@ export class RegexExecutor {
 
   get pendingCount(): number {
     return this.pending.length + (this.active ? 1 : 0)
+  }
+
+  resetCache(): void {
+    this.cacheGeneration++
   }
 
   execute(request: WorkerRequest, signal?: AbortSignal): Promise<MatchResult[]> {
@@ -319,7 +338,9 @@ export class RegexExecutor {
     worker.once('exit', onExit)
     try {
       const { text, ...rest } = job.request
-      const request = this.workerText === text ? rest : job.request
+      const request = this.workerText === text
+        ? { ...rest, cacheGeneration: this.cacheGeneration }
+        : { ...job.request, cacheGeneration: this.cacheGeneration }
       worker.postMessage({ id, request })
       this.workerText = text
     }

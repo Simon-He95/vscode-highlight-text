@@ -3,7 +3,7 @@ import type * as vscodeMockType from './mocks/vscode'
 import * as vscodeUtils from '@vscode-use/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as vscode from 'vscode'
-import { activate } from '../src/index'
+import { activate, getRuleLanguageId } from '../src/index'
 
 vi.mock('@vscode-use/utils', () => {
   const configuration = { exclude: [] as string[], rules: {} as object }
@@ -23,7 +23,8 @@ const configuration = (vscodeUtils as unknown as { __configuration: { exclude: s
 const { Position, Range, window } = vscode
 const { __events, __resetVscodeMock } = vscode as unknown as typeof vscodeMockType
 
-function createEditor(text: string, documentId = 'document') {
+function createEditor(initialText: string, documentId = 'document') {
+  let text = initialText
   const document = {
     getText: vi.fn((range?: VscodeRange) => range
       ? text.slice(range.start.character, range.end.character)
@@ -37,11 +38,17 @@ function createEditor(text: string, documentId = 'document') {
     uri: { fsPath: `/src/${documentId}.txt`, path: `/src/${documentId}.txt` },
     version: 1,
   }
-  return {
+  const editor = {
     document,
     setDecorations: vi.fn(),
+    setText(value: string) {
+      text = value
+      document.version++
+      editor.visibleRanges = [new Range(new Position(0, 0), new Position(0, text.length))]
+    },
     visibleRanges: [new Range(new Position(0, 0), new Position(0, text.length))],
   }
+  return editor
 }
 
 async function waitFor(assertion: () => void, timeout = 2_000): Promise<void> {
@@ -63,6 +70,18 @@ function disposeContext(context: ExtensionContext): void {
   for (const disposable of context.subscriptions)
     disposable.dispose()
 }
+
+describe('vue TSX language detection', () => {
+  it('recognizes script and template TSX blocks', () => {
+    const script = createEditor('<script setup lang="tsx">const view = <div /></script>')
+    script.document.languageId = 'vue'
+    expect(getRuleLanguageId(script.document as any)).toBe('vuetsx')
+
+    const template = createEditor('<template lang = "tsx"><div /></template>')
+    template.document.languageId = 'vue'
+    expect(getRuleLanguageId(template.document as any)).toBe('vuetsx')
+  })
+})
 
 describe('extension activation orchestration', () => {
   beforeEach(() => {
@@ -97,6 +116,50 @@ describe('extension activation orchestration', () => {
     window.visibleTextEditors = [second] as any
     await __events.visibleEditors.fire([...window.visibleTextEditors])
     await waitFor(() => expect(first.setDecorations).toHaveBeenCalledWith(expect.anything(), []))
+
+    disposeContext(context)
+  })
+
+  it('does not automatically retry an unchanged timed-out rule', async () => {
+    configuration.rules = {
+      plaintext: { light: { red: ['(a+)+$'] } },
+    }
+    const editor = createEditor(`${'a'.repeat(20_000)}b`, 'timeout')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('exceeded 500ms')))
+    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 30_000)).toBe(false)
+
+    disposeContext(context)
+  })
+
+  it('preserves the previous complete decoration snapshot when timeouts exhaust the refresh budget', async () => {
+    configuration.rules = {
+      plaintext: {
+        light: {
+          red: ['(a+)+$'],
+          blue: ['(a|aa)+$'],
+          green: ['NORMAL'],
+        },
+      },
+    }
+    const editor = createEditor('NORMAL', 'budget')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalled())
+    editor.setDecorations.mockClear()
+    editor.setText(`${'a'.repeat(20_000)}b NORMAL`)
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    await waitFor(() => {
+      const timeoutWarnings = vi.mocked(window.showWarningMessage).mock.calls.filter(([message]) => String(message).includes('exceeded 500ms'))
+      expect(timeoutWarnings).toHaveLength(2)
+    }, 3_000)
+    expect(editor.setDecorations).not.toHaveBeenCalled()
 
     disposeContext(context)
   })

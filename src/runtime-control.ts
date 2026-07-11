@@ -90,8 +90,12 @@ export class RefreshBudget {
     return Math.max(0, this.maxRanges - this.ranges)
   }
 
+  get timeExceeded(): boolean {
+    return this.now() - this.startedAt >= this.maxDurationMs
+  }
+
   get exhausted(): boolean {
-    return this.remainingRanges === 0 || this.now() - this.startedAt >= this.maxDurationMs
+    return this.remainingRanges === 0 || this.timeExceeded
   }
 
   consumeRange(): boolean {

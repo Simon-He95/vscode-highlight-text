@@ -106,13 +106,19 @@ async function scanRule(
     : []))
 }
 
-function getRules(config: CompiledConfig, document: TextDocument): CompiledRule[] {
-  const previewEnd = document.lineAt(Math.min(document.lineCount - 1, 99)).rangeIncludingLineBreak.end
-  const languageId = document.languageId === 'vue'
-    && /<template\b[^>]*\slang=["']tsx["']/.test(document.getText(new Range(new Position(0, 0), previewEnd)))
+export function getRuleLanguageId(document: TextDocument): string {
+  if (document.languageId !== 'vue')
+    return document.languageId
+  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
+  const previewEnd = document.positionAt(Math.min(documentEnd, 100_000))
+  const preview = document.getText(new Range(new Position(0, 0), previewEnd))
+  return /<(?:script|template)\b[^>]*\slang\s*=\s*["']tsx["']/i.test(preview)
     ? 'vuetsx'
     : document.languageId
-  return getRulesForLanguage(config, languageId, isDarkTheme())
+}
+
+function getRules(config: CompiledConfig, document: TextDocument): CompiledRule[] {
+  return getRulesForLanguage(config, getRuleLanguageId(document), isDarkTheme())
 }
 
 export function activate(context: ExtensionContext): void {
@@ -122,8 +128,6 @@ export function activate(context: ExtensionContext): void {
   const manager = new DecorationManager(compiled.styles)
   const executor = new RegexExecutor()
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
-  const cooldownTimers = new Map<TextDocument, ReturnType<typeof setTimeout>>()
-  let scheduleCooldownRetry: (document: TextDocument) => void = () => {}
   const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
 
   const warnOnce = (warning: string) => {
@@ -191,7 +195,6 @@ export function activate(context: ExtensionContext): void {
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
           if (isRegexExecutionTimeoutError(error)) {
             failures.recordFailure(document, rule.id)
-            scheduleCooldownRetry(document)
             warnOnce(`${rule.context}: ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
           }
           else {
@@ -205,8 +208,12 @@ export function activate(context: ExtensionContext): void {
         break
     }
 
-    if (budgetExceeded)
-      warnOnce(`Highlight refresh budget reached in ${document.uri.fsPath}; remaining rules were skipped`)
+    if (budget.timeExceeded)
+      budgetExceeded = true
+    if (budgetExceeded) {
+      warnOnce(`Highlight refresh budget reached in ${document.uri.fsPath}; previous complete highlights were preserved`)
+      return
+    }
     if (isCurrent())
       manager.apply(editor, rangesByStyle)
   }
@@ -217,32 +224,12 @@ export function activate(context: ExtensionContext): void {
     error => warnOnce(error instanceof Error ? error.message : String(error)),
   )
 
-  scheduleCooldownRetry = (document) => {
-    const existing = cooldownTimers.get(document)
-    if (existing)
-      clearTimeout(existing)
-    cooldownTimers.set(document, setTimeout(() => {
-      cooldownTimers.delete(document)
-      for (const editor of window.visibleTextEditors) {
-        if (editor.document === document)
-          scheduler.schedule(editor, true)
-      }
-    }, REGEX_FAILURE_COOLDOWN))
-  }
-
   const refreshVisibleEditors = (immediate = true) => {
     const visible = new Set(window.visibleTextEditors)
     for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
         scheduler.remove(editor)
         manager.clear(editor)
-      }
-    }
-    for (const [document, timer] of cooldownTimers) {
-      if (!window.visibleTextEditors.some(editor => editor.document === document)) {
-        clearTimeout(timer)
-        cooldownTimers.delete(document)
-        failures.clearDocument(document)
       }
     }
     window.visibleTextEditors.forEach(editor => scheduler.schedule(editor, immediate))
@@ -256,6 +243,8 @@ export function activate(context: ExtensionContext): void {
 
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((event) => {
+      if (event.contentChanges.length)
+        failures.clearDocument(event.document)
       for (const editor of window.visibleTextEditors) {
         if (editor.document === event.document && event.contentChanges.length)
           scheduler.schedule(editor)
@@ -275,9 +264,7 @@ export function activate(context: ExtensionContext): void {
       compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
       shouldProcess = getExcludeFilter()
       failures.clear()
-      for (const timer of cooldownTimers.values())
-        clearTimeout(timer)
-      cooldownTimers.clear()
+      executor.resetCache()
       warned.clear()
       compiled.warnings.forEach(warnOnce)
       rebuildAndRefresh()
@@ -293,9 +280,6 @@ export function activate(context: ExtensionContext): void {
     {
       dispose: () => {
         disposed = true
-        for (const timer of cooldownTimers.values())
-          clearTimeout(timer)
-        cooldownTimers.clear()
         scheduler.dispose()
         executor.dispose()
         manager.dispose()
