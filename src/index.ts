@@ -6,7 +6,7 @@ import { deepMerge } from 'lazy-js-utils'
 import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
-import { isRegexExecutionAbortedError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
+import { isRegexExecutionAbortedError, isRegexExecutionBudgetError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
@@ -38,6 +38,11 @@ const defaultConfig = {
     },
   },
   react: { light: {}, dark: {} },
+}
+
+interface RuleSnapshot {
+  documentVersion: number
+  rangesByStyle: Map<string, VscodeRange[]>
 }
 
 interface ScanSlice {
@@ -88,10 +93,12 @@ async function scanRule(
   slice: ScanSlice,
   signal: AbortSignal,
   maxMatches: number,
+  maxSpans: number,
 ): Promise<Array<{ end: number, start: number, styleId: string }>> {
   const matches = await executor.execute({
     ignores: rule.ignores,
     maxMatches,
+    maxSpans,
     pattern: rule.pattern,
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
@@ -115,7 +122,10 @@ export function getRuleLanguageId(document: TextDocument): string {
   if (cached?.version === document.version && cached.languageId === document.languageId)
     return cached.result
 
-  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
+  const documentEnd = Math.min(
+    document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end),
+    1_000_000,
+  )
   const blockSize = 100_000
   let carry = ''
   let result = document.languageId
@@ -136,7 +146,10 @@ export function getRuleLanguageId(document: TextDocument): string {
 }
 
 function getRules(config: CompiledConfig, document: TextDocument): CompiledRule[] {
-  return getRulesForLanguage(config, getRuleLanguageId(document), isDarkTheme())
+  const languageId = document.languageId === 'vue' && config.languages.has('vuetsx')
+    ? getRuleLanguageId(document)
+    : document.languageId
+  return getRulesForLanguage(config, languageId, isDarkTheme())
 }
 
 export function activate(context: ExtensionContext): void {
@@ -153,7 +166,7 @@ export function activate(context: ExtensionContext): void {
     compiled = { languages: new Map(), styles: new Map(), warnings: compiled.warnings }
     manager = new DecorationManager(new Map())
   }
-  let ruleSnapshots = new WeakMap<TextEditor, Map<string, Map<string, VscodeRange[]>>>()
+  let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
   const executors = new Map<TextEditor, RegexExecutor>()
   const getExecutor = (editor: TextEditor) => {
     const existing = executors.get(editor)
@@ -189,19 +202,27 @@ export function activate(context: ExtensionContext): void {
 
     if (!isCurrent())
       return
+    const clearEditor = () => {
+      executors.get(editor)?.dispose()
+      executors.delete(editor)
+      ruleSnapshots.delete(editor)
+      manager.clear(editor)
+    }
+    if (!shouldProcess(document.uri.path) || !editor.visibleRanges.length) {
+      if (isCurrent())
+        clearEditor()
+      return
+    }
     const rules = getRules(compiled, document)
-    if (!shouldProcess(document.uri.path) || !editor.visibleRanges.length || !rules.length) {
-      if (isCurrent()) {
-        executors.get(editor)?.dispose()
-        executors.delete(editor)
-        ruleSnapshots.delete(editor)
-        manager.clear(editor)
-      }
+    if (!rules.length) {
+      if (isCurrent())
+        clearEditor()
       return
     }
 
-    const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, Map<string, VscodeRange[]>>()
+    const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
     const scannedSnapshots = new Map<string, Map<string, VscodeRange[]>>()
+    const scannedRangeKeys = new Set<string>()
     const failedRuleIds = new Set<string>()
     const executor = getExecutor(editor)
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
@@ -222,14 +243,18 @@ export function activate(context: ExtensionContext): void {
         }
         const maxMatches = MAX_MATCHES_PER_RULE
         try {
-          const matches = await scanRule(executor, rule, slice, task.signal, maxMatches)
+          const matches = await scanRule(executor, rule, slice, task.signal, maxMatches, MAX_TOTAL_RANGES)
           if (!isCurrent())
             return
           for (const match of matches) {
+            const rangeKey = `${match.styleId}:${match.start}-${match.end}`
+            if (scannedRangeKeys.has(rangeKey))
+              continue
             if (!budget.consumeRange()) {
               budgetExceeded = true
               break
             }
+            scannedRangeKeys.add(rangeKey)
             const ruleSnapshot = scannedSnapshots.get(rule.id) ?? new Map<string, VscodeRange[]>()
             const ranges = ruleSnapshot.get(match.styleId) ?? []
             ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
@@ -241,17 +266,22 @@ export function activate(context: ExtensionContext): void {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
-          failedRuleIds.add(rule.id)
-          if (isRegexExecutionTimeoutError(error)) {
-            failures.recordFailure(document, rule.id)
-            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
-          }
-          else if (isRegexExecutionLimitError(error)) {
-            failures.recordFailure(document, rule.id)
-            warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
+          if (isRegexExecutionBudgetError(error)) {
+            budgetExceeded = true
           }
           else {
-            warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
+            failedRuleIds.add(rule.id)
+            if (isRegexExecutionTimeoutError(error)) {
+              failures.recordFailure(document, rule.id)
+              warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
+            }
+            else if (isRegexExecutionLimitError(error)) {
+              failures.recordFailure(document, rule.id)
+              warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
+            }
+            else {
+              warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
+            }
           }
         }
         if (budgetExceeded)
@@ -268,13 +298,20 @@ export function activate(context: ExtensionContext): void {
       return
     }
     if (isCurrent()) {
-      const nextSnapshots = new Map<string, Map<string, VscodeRange[]>>()
+      const nextSnapshots = new Map<string, RuleSnapshot>()
       for (const rule of rules) {
-        const snapshot = failedRuleIds.has(rule.id) ? previousSnapshots.get(rule.id) : scannedSnapshots.get(rule.id) ?? new Map()
+        const previous = previousSnapshots.get(rule.id)
+        const snapshot = failedRuleIds.has(rule.id)
+          ? previous?.documentVersion === documentVersion ? previous : undefined
+          : { documentVersion, rangesByStyle: scannedSnapshots.get(rule.id) ?? new Map() }
         if (snapshot)
           nextSnapshots.set(rule.id, snapshot)
       }
-      const rangesByStyle = aggregateSnapshots(nextSnapshots.values(), MAX_TOTAL_RANGES)
+      const rangesByStyle = aggregateSnapshots(
+        [...nextSnapshots.values()].map(snapshot => snapshot.rangesByStyle),
+        MAX_TOTAL_RANGES,
+        (_styleId, range) => `${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`,
+      )
       if (!rangesByStyle) {
         warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; previous complete highlights were preserved`)
         return

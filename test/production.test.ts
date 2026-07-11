@@ -62,6 +62,57 @@ describe('regex configuration', () => {
     expect(compiled.warnings).toContain(`Potentially expensive ignoreReg for vue.light.green: ${nestedPlus}`)
   })
 
+  it('rejects oversized target and ignore arrays before worker execution', () => {
+    const oversized = Array.from({ length: 101 }, () => 'red')
+    const compiled = compileConfig({
+      vue: { light: {
+        red: { match: ['foo'], colors: oversized },
+        blue: { match: ['bar'], ignoreReg: oversized },
+      } },
+    })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toEqual([])
+    expect(compiled.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('at most 100 targets'),
+      expect.stringContaining('at most 100 patterns'),
+    ]))
+  })
+
+  it('caps merged composite languages and React aliases', () => {
+    const patternsA = Array.from({ length: 600 }, (_, index) => `a${index}`)
+    const patternsB = Array.from({ length: 600 }, (_, index) => `b${index}`)
+    const reactPatterns = Array.from({ length: 1_000 }, (_, index) => `r${index}`)
+    const compiled = compileConfig({
+      'vue|a': { light: { red: patternsA } },
+      'vue|b': { light: { blue: patternsB } },
+      'react': { light: { red: reactPatterns } },
+      'javascriptreact': { light: { blue: reactPatterns } },
+      'typescriptreact': { light: { green: reactPatterns } },
+    })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(1_000)
+    expect(getRulesForLanguage(compiled, 'javascriptreact', false)).toHaveLength(1_000)
+    expect(getRulesForLanguage(compiled, 'typescriptreact', false)).toHaveLength(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many merged rules for vue'))
+  })
+
+  it('caps global languages, rule entries, and retained styles', () => {
+    const patterns = Array.from({ length: 1_000 }, (_, index) => `p${index}`)
+    const raw = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [
+      `language${index}`,
+      { light: { [`color${index}`]: patterns } },
+    ]))
+    const compiled = compileConfig(raw)
+    const totalRules = [...compiled.languages.values()]
+      .reduce((total, modes) => total + modes.dark.length + modes.light.length, 0)
+    expect(totalRules).toBe(5_000)
+    expect(compiled.styles.size).toBe(5)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('5000 total language-mode rule entries'))
+
+    const tooManyLanguages = compileConfig(Object.fromEntries(
+      Array.from({ length: 101 }, (_, index) => [`language${index}`, { light: { red: [`p${index}`] } }]),
+    ))
+    expect(tooManyLanguages.languages.size).toBe(100)
+  })
+
   it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
     const compiled = compileConfig({
       vue: {
@@ -252,6 +303,27 @@ describe('regex execution', () => {
       targetGroups: [1],
       text: 'foo',
     })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?<=foo)bar', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'bar', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo(?=bar)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?=foo)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([])
     executor.dispose()
   })
 
@@ -264,6 +336,32 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: `${'x'.repeat(1_001)}TARGET`,
     })).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+    executor.dispose()
+  })
+
+  it('enforces a shared ignore interval budget', async () => {
+    const executor = new RegexExecutor(500)
+    const characters = 'abcdefghijk'.split('')
+    await expect(executor.execute({
+      ignores: characters.map(source => ({ source, flags: 'gd' })),
+      maxMatches: 1_000,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${characters.map(character => character.repeat(1_000)).join('')}TARGET`,
+    })).rejects.toThrow('Ignore patterns exceeded 10000 total intervals')
+    executor.dispose()
+  })
+
+  it('enforces the span budget inside the worker', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      maxSpans: 1,
+      pattern: { source: '(x)(x)', flags: 'gd' },
+      targetGroups: [1, 2],
+      text: 'xx',
+    })).rejects.toThrow('Rule output exceeded the remaining 1 span budget')
     executor.dispose()
   })
 
@@ -400,6 +498,12 @@ describe('runtime controls', () => {
       ['red', [0, 1, 2, 3, 4, 5]],
       ['blue', [0, 1, 2, 3, 4]],
     ]))
+  })
+
+  it('deduplicates equal values while aggregating snapshots', () => {
+    const first = new Map([['red', [{ start: 1, end: 2 }]]])
+    const second = new Map([['red', [{ start: 1, end: 2 }]]])
+    expect(aggregateSnapshots([first, second], 10, (_style, value) => `${value.start}:${value.end}`)?.get('red')).toHaveLength(1)
   })
 
   it('bounds remembered warning keys', () => {

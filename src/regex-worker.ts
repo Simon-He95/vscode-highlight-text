@@ -6,6 +6,7 @@ export interface WorkerRequest {
   cacheGeneration?: number
   ignores: CompiledPattern[]
   maxMatches: number
+  maxSpans?: number
   pattern: CompiledPattern
   targetGroups: Array<number | undefined>
   text: string
@@ -30,7 +31,10 @@ const WORKER_SOURCE = String.raw`
 const { parentPort } = require('node:worker_threads')
 let cachedText
 let ignoreCache = new Map()
+let ignoreCacheIntervalCount = 0
 let cachedGeneration = -1
+const MAX_IGNORE_INTERVALS = 10000
+const MAX_CACHED_IGNORE_INTERVALS = 20000
 
 function advanceStringIndex(text, index, unicode) {
   if (!unicode)
@@ -60,10 +64,12 @@ parentPort.on('message', ({ id, request }) => {
     if (request.text !== undefined) {
       cachedText = request.text
       ignoreCache = new Map()
+      ignoreCacheIntervalCount = 0
     }
     if (request.cacheGeneration !== cachedGeneration) {
       cachedGeneration = request.cacheGeneration
       ignoreCache = new Map()
+      ignoreCacheIntervalCount = 0
     }
     if (cachedText === undefined)
       throw new Error('Regular expression worker text is not initialized')
@@ -77,8 +83,14 @@ parentPort.on('message', ({ id, request }) => {
         const regex = new RegExp(pattern.source, pattern.flags)
         const collected = collect(regex, text, maxIgnoreMatches, (match) => {
           const span = match.indices && match.indices[0]
-          if (span)
+          if (span) {
+            if (ignored.length >= MAX_IGNORE_INTERVALS) {
+              const error = new Error('Ignore patterns exceeded ' + MAX_IGNORE_INTERVALS + ' total intervals')
+              error.code = 'IGNORE_LIMIT'
+              throw error
+            }
             ignored.push(span)
+          }
         })
         if (collected.truncated)
           {
@@ -97,13 +109,25 @@ parentPort.on('message', ({ id, request }) => {
         else
           mergedIgnored.push([...span])
       }
-      if (ignoreCache.size >= 100) {
+      while (ignoreCache.size && (ignoreCache.size >= 100 || ignoreCacheIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS)) {
         const oldest = ignoreCache.keys().next()
-        if (!oldest.done)
-          ignoreCache.delete(oldest.value)
+        if (oldest.done)
+          break
+        ignoreCacheIntervalCount -= ignoreCache.get(oldest.value).length
+        ignoreCache.delete(oldest.value)
       }
       ignoreCache.set(ignoreKey, mergedIgnored)
+      ignoreCacheIntervalCount += mergedIgnored.length
     }
+    let maskedText = ''
+    let cursor = 0
+    for (const [start, end] of mergedIgnored) {
+      const ignoredText = text.slice(start, end).replace(/[^\r\n]/g, ' ')
+      maskedText += text.slice(cursor, start) + ignoredText
+      cursor = end
+    }
+    maskedText += text.slice(cursor)
+
     function overlapsIgnored(span) {
       let low = 0
       let high = mergedIgnored.length
@@ -119,8 +143,10 @@ parentPort.on('message', ({ id, request }) => {
     }
 
     const regex = new RegExp(request.pattern.source, request.pattern.flags)
+    const maxSpans = request.maxSpans ?? 10000
+    let spanCount = 0
     const results = []
-    const collected = collect(regex, text, request.maxMatches, (match) => {
+    const collected = collect(regex, maskedText, request.maxMatches, (match) => {
       const fullSpan = match.indices && match.indices[0]
       if (!fullSpan)
         return
@@ -142,8 +168,16 @@ parentPort.on('message', ({ id, request }) => {
       })
       if (overlapsIgnored(fullSpan) || spans.some(span => span && overlapsIgnored(span)))
         return
-      if (spans.some(Boolean))
+      const validSpanCount = spans.filter(Boolean).length
+      if (spanCount + validSpanCount > maxSpans) {
+        const error = new Error('Rule output exceeded the remaining ' + maxSpans + ' span budget')
+        error.code = 'SPAN_BUDGET'
+        throw error
+      }
+      if (validSpanCount) {
+        spanCount += validSpanCount
         results.push({ spans })
+      }
     })
     if (collected.truncated) {
       const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
@@ -172,6 +206,13 @@ export class RegexExecutionTimeoutError extends Error {
   }
 }
 
+export class RegexExecutionBudgetError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegexExecutionBudgetError'
+  }
+}
+
 export class RegexExecutionLimitError extends Error {
   constructor(message: string) {
     super(message)
@@ -185,6 +226,10 @@ export function isRegexExecutionAbortedError(error: unknown): error is RegexExec
 
 export function isRegexExecutionTimeoutError(error: unknown): error is RegexExecutionTimeoutError {
   return error instanceof RegexExecutionTimeoutError
+}
+
+export function isRegexExecutionBudgetError(error: unknown): error is RegexExecutionBudgetError {
+  return error instanceof RegexExecutionBudgetError
 }
 
 export function isRegexExecutionLimitError(error: unknown): error is RegexExecutionLimitError {
@@ -364,9 +409,11 @@ export class RegexExecutor {
       if (message.id !== id)
         return
       const error = message.error
-        ? message.errorCode === 'IGNORE_LIMIT' || message.errorCode === 'MATCH_LIMIT'
-          ? new RegexExecutionLimitError(message.error)
-          : new Error(message.error)
+        ? message.errorCode === 'SPAN_BUDGET'
+          ? new RegexExecutionBudgetError(message.error)
+          : message.errorCode === 'IGNORE_LIMIT' || message.errorCode === 'MATCH_LIMIT'
+            ? new RegexExecutionLimitError(message.error)
+            : new Error(message.error)
         : undefined
       finish(error, message.results)
     }

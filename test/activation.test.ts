@@ -87,6 +87,10 @@ describe('vue TSX language detection', () => {
     const reads = lateScript.document.getText.mock.calls.length
     expect(getRuleLanguageId(lateScript.document as any)).toBe('vuetsx')
     expect(lateScript.document.getText).toHaveBeenCalledTimes(reads)
+
+    const beyondLimit = createEditor(`${'x'.repeat(1_000_001)}<script lang="tsx"></script>`, 'limited-vue')
+    beyondLimit.document.languageId = 'vue'
+    expect(getRuleLanguageId(beyondLimit.document as any)).toBe('vue')
   })
 })
 
@@ -105,6 +109,23 @@ describe('extension activation orchestration', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     __resetVscodeMock()
+  })
+
+  it('does not scan an excluded Vue document for TSX blocks', async () => {
+    configuration.exclude = ['**/excluded/**']
+    configuration.rules = {
+      vuetsx: { light: { red: ['foo'] } },
+    }
+    const editor = createEditor(`${'x'.repeat(200_000)}<script lang="tsx"></script>`, '../excluded/large')
+    editor.document.languageId = 'vue'
+    editor.document.uri.path = '/excluded/large.vue'
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(editor.document.getText).not.toHaveBeenCalled()
+    disposeContext(context)
   })
 
   it('stays active with an empty manager when initial type creation fails', () => {
@@ -205,7 +226,7 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('preserves failed rule ranges independently from successful rules sharing a style', async () => {
+  it('does not resubmit failed rule ranges from an older document version', async () => {
     configuration.rules = {
       plaintext: {
         light: {
@@ -227,7 +248,8 @@ describe('extension activation orchestration', () => {
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('exceeded 500ms')))
     await waitFor(() => {
       const update = editor.setDecorations.mock.calls.find(([type, ranges]) => type === redType && ranges.length > 0)
-      expect(update?.[1]).toHaveLength(2)
+      expect(update?.[1]).toHaveLength(1)
+      expect(update?.[1][0].start.character).toBe(0)
     })
 
     disposeContext(context)

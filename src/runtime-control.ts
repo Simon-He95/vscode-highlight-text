@@ -1,21 +1,29 @@
 export function aggregateSnapshots<Value>(
   snapshots: Iterable<Map<string, Value[]>>,
   maxValues: number,
+  getValueKey?: (styleId: string, value: Value) => string,
 ): Map<string, Value[]> | undefined {
-  const collected = [...snapshots]
-  let total = 0
-  for (const snapshot of collected) {
-    for (const values of snapshot.values()) {
-      total += values.length
-      if (total > maxValues)
-        return
-    }
-  }
-
   const aggregated = new Map<string, Value[]>()
-  for (const snapshot of collected) {
-    for (const [key, values] of snapshot)
-      aggregated.set(key, [...(aggregated.get(key) ?? []), ...values])
+  const seen = new Map<string, Set<string>>()
+  let total = 0
+  for (const snapshot of snapshots) {
+    for (const [styleId, values] of snapshot) {
+      const target = aggregated.get(styleId) ?? []
+      const styleKeys = seen.get(styleId) ?? new Set<string>()
+      for (const value of values) {
+        const key = getValueKey?.(styleId, value)
+        if (key !== undefined && styleKeys.has(key))
+          continue
+        total++
+        if (total > maxValues)
+          return
+        target.push(value)
+        if (key !== undefined)
+          styleKeys.add(key)
+      }
+      aggregated.set(styleId, target)
+      seen.set(styleId, styleKeys)
+    }
   }
   return aggregated
 }

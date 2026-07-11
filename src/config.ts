@@ -4,6 +4,12 @@ import { createFilter } from '@rollup/pluginutils'
 import { DecorationRangeBehavior } from 'vscode'
 import { compilePattern, isPatternTuple, isRegexSafe, normalizePatterns } from './regex'
 
+const MAX_IGNORE_PATTERNS_PER_RULE = 100
+const MAX_LANGUAGES = 100
+const MAX_RULES_PER_MODE = 1000
+const MAX_TARGETS_PER_RULE = 100
+const MAX_TOTAL_RULES = 5000
+const MAX_TOTAL_STYLES = 1000
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
 
 function stableSerialize(value: unknown): string {
@@ -31,8 +37,11 @@ export function normalizeStyle(raw: Record<string, unknown>): DecorationRenderOp
 
 function addStyle(config: CompiledConfig, style: DecorationRenderOptions): string {
   const id = stableSerialize(style)
-  if (!config.styles.has(id))
+  if (!config.styles.has(id)) {
+    if (config.styles.size >= MAX_TOTAL_STYLES)
+      throw new Error(`Configuration exceeds ${MAX_TOTAL_STYLES} unique styles`)
     config.styles.set(id, style)
+  }
   return id
 }
 
@@ -50,6 +59,10 @@ function compileTargets(
   if (option && 'matchCss' in option) {
     if (!Array.isArray(option.matchCss)) {
       config.warnings.push(`Invalid matchCss for ${context}: expected an array of style objects`)
+      return
+    }
+    if (option.matchCss.length > MAX_TARGETS_PER_RULE) {
+      config.warnings.push(`Invalid matchCss for ${context}: at most ${MAX_TARGETS_PER_RULE} targets are allowed`)
       return
     }
     const styles = option.matchCss.filter(isStyleObject)
@@ -70,6 +83,10 @@ function compileTargets(
   if (option && 'colors' in option) {
     if (!Array.isArray(option.colors)) {
       config.warnings.push(`Invalid colors for ${context}: expected an array of strings`)
+      return
+    }
+    if (option.colors.length > MAX_TARGETS_PER_RULE) {
+      config.warnings.push(`Invalid colors for ${context}: at most ${MAX_TARGETS_PER_RULE} targets are allowed`)
       return
     }
     const colors = option.colors.filter((value): value is string => typeof value === 'string')
@@ -115,6 +132,10 @@ function compileStyleRules(
     config.warnings.push(`Invalid match patterns for ${context}`)
     return []
   }
+  if (patterns.length > MAX_RULES_PER_MODE) {
+    config.warnings.push(`Too many match patterns for ${context}: at most ${MAX_RULES_PER_MODE} patterns are allowed`)
+    patterns = patterns.slice(0, MAX_RULES_PER_MODE)
+  }
 
   const commonStyle = normalizeStyle({ ...base, ...(option ?? {}) })
   const targets = compileTargets(option, base, commonStyle, context, config)
@@ -123,6 +144,10 @@ function compileStyleRules(
 
   let ignores: ReturnType<typeof compilePattern>[] = []
   if (option && 'ignoreReg' in option) {
+    if (Array.isArray(option.ignoreReg) && option.ignoreReg.length > MAX_IGNORE_PATTERNS_PER_RULE) {
+      config.warnings.push(`Invalid ignoreReg for ${context}: at most ${MAX_IGNORE_PATTERNS_PER_RULE} patterns are allowed`)
+      return []
+    }
     const ignorePatterns = normalizePatterns(option.ignoreReg)
     if (!ignorePatterns.length && option.ignoreReg !== undefined)
       config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
@@ -163,15 +188,21 @@ function compileStyleRules(
 function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig): CompiledRule[] {
   if (!isStyleObject(raw))
     return []
-  return Object.entries(raw).flatMap(([color, value]) => {
+  const rules: CompiledRule[] = []
+  for (const [color, value] of Object.entries(raw)) {
+    if (rules.length >= MAX_RULES_PER_MODE) {
+      config.warnings.push(`Too many rules for ${language}.${mode}: at most ${MAX_RULES_PER_MODE} rules are allowed`)
+      break
+    }
     try {
-      return compileStyleRules(color, value, `${language}.${mode}.${color}`, config)
+      const remaining = MAX_RULES_PER_MODE - rules.length
+      rules.push(...compileStyleRules(color, value, `${language}.${mode}.${color}`, config).slice(0, remaining))
     }
     catch (error) {
       config.warnings.push(`Invalid configuration for ${language}.${mode}.${color}: ${error instanceof Error ? error.message : String(error)}`)
-      return []
     }
-  })
+  }
+  return rules
 }
 
 export function compileConfig(raw: unknown): CompiledConfig {
@@ -196,10 +227,45 @@ export function compileConfig(raw: unknown): CompiledConfig {
     }
     for (const language of languageKey.split('|').map(item => item.trim()).filter(Boolean)) {
       const existing = result.languages.get(language)
-      result.languages.set(language, existing
-        ? { dark: [...compiled.dark, ...existing.dark], light: [...compiled.light, ...existing.light] }
-        : compiled)
+      if (!existing && result.languages.size >= MAX_LANGUAGES) {
+        result.warnings.push(`Too many languages: at most ${MAX_LANGUAGES} languages are allowed`)
+        break
+      }
+      if (!existing) {
+        result.languages.set(language, compiled)
+        continue
+      }
+      const dark = [...compiled.dark, ...existing.dark]
+      const light = [...compiled.light, ...existing.light]
+      if (dark.length > MAX_RULES_PER_MODE || light.length > MAX_RULES_PER_MODE)
+        result.warnings.push(`Too many merged rules for ${language}: at most ${MAX_RULES_PER_MODE} rules per mode are allowed`)
+      result.languages.set(language, {
+        dark: dark.slice(0, MAX_RULES_PER_MODE),
+        light: light.slice(0, MAX_RULES_PER_MODE),
+      })
     }
+  }
+
+  let totalRules = 0
+  let rulesTruncated = false
+  const usedStyleIds = new Set<string>()
+  for (const [language, modes] of result.languages) {
+    const limitMode = (rules: CompiledRule[]) => rules.filter((rule) => {
+      if (totalRules >= MAX_TOTAL_RULES) {
+        rulesTruncated = true
+        return false
+      }
+      totalRules++
+      rule.targets.forEach(target => usedStyleIds.add(target.styleId))
+      return true
+    })
+    result.languages.set(language, { dark: limitMode(modes.dark), light: limitMode(modes.light) })
+  }
+  if (rulesTruncated)
+    result.warnings.push(`Configuration is limited to ${MAX_TOTAL_RULES} total language-mode rule entries`)
+  for (const styleId of result.styles.keys()) {
+    if (!usedStyleIds.has(styleId))
+      result.styles.delete(styleId)
   }
   return result
 }
@@ -220,5 +286,5 @@ export function getRulesForLanguage(config: CompiledConfig, languageId: string, 
   }
   const languages = aliases[languageId] ?? [languageId]
   const mode = dark ? 'dark' : 'light'
-  return [...new Set(languages.flatMap(language => config.languages.get(language)?.[mode] ?? []))]
+  return [...new Set(languages.flatMap(language => config.languages.get(language)?.[mode] ?? []))].slice(0, MAX_RULES_PER_MODE)
 }
