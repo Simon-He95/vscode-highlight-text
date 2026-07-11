@@ -94,8 +94,25 @@ export class RegexExecutionAbortedError extends Error {
   }
 }
 
+export class RegexExecutionTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Regular expression execution exceeded ${timeoutMs}ms`)
+    this.name = 'RegexExecutionTimeoutError'
+  }
+}
+
 export function isRegexExecutionAbortedError(error: unknown): error is RegexExecutionAbortedError {
   return error instanceof RegexExecutionAbortedError
+}
+
+export function isRegexExecutionTimeoutError(error: unknown): error is RegexExecutionTimeoutError {
+  return error instanceof RegexExecutionTimeoutError
+}
+
+export type WorkerFactory = () => WorkerType
+
+export function createRegexWorker(): WorkerType {
+  return new Worker(WORKER_SOURCE, { eval: true })
 }
 
 export class RegexExecutor {
@@ -106,7 +123,10 @@ export class RegexExecutor {
   private readonly pending: PendingJob[] = []
   private worker?: WorkerType
 
-  constructor(private readonly timeoutMs = 500) {}
+  constructor(
+    private readonly timeoutMs = 500,
+    private readonly workerFactory: WorkerFactory = createRegexWorker,
+  ) {}
 
   get pendingCount(): number {
     return this.pending.length + (this.active ? 1 : 0)
@@ -154,10 +174,25 @@ export class RegexExecutor {
   }
 
   private createWorker(): WorkerType {
-    const worker = new Worker(WORKER_SOURCE, { eval: true })
-    worker.unref()
-    this.worker = worker
-    return worker
+    let worker: WorkerType | undefined
+    try {
+      worker = this.workerFactory()
+      worker.unref()
+      worker.on('error', () => {
+        if (this.worker === worker)
+          this.worker = undefined
+      })
+      worker.on('exit', () => {
+        if (this.worker === worker)
+          this.worker = undefined
+      })
+      this.worker = worker
+      return worker
+    }
+    catch (error) {
+      void worker?.terminate()
+      throw error
+    }
   }
 
   private drain(): void {
@@ -173,7 +208,17 @@ export class RegexExecutor {
       return
     }
     this.active = job
-    this.run(job)
+    try {
+      this.run(job)
+    }
+    catch (error) {
+      this.removeAbortListener(job)
+      this.active = undefined
+      this.activeCancel = undefined
+      this.worker = undefined
+      job.reject(error instanceof Error ? error : new Error(String(error)))
+      queueMicrotask(() => this.drain())
+    }
   }
 
   private removeAbortListener(job: PendingJob): void {
@@ -226,12 +271,17 @@ export class RegexExecutor {
 
     this.activeCancel = error => finish(error, undefined, true)
     timer = setTimeout(
-      () => finish(new Error(`Regular expression execution exceeded ${this.timeoutMs}ms`), undefined, true),
+      () => finish(new RegexExecutionTimeoutError(this.timeoutMs), undefined, true),
       this.timeoutMs,
     )
     worker.on('message', onMessage)
     worker.once('error', onError)
     worker.once('exit', onExit)
-    worker.postMessage({ id, request: job.request })
+    try {
+      worker.postMessage({ id, request: job.request })
+    }
+    catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)), undefined, true)
+    }
   }
 }

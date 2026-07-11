@@ -21,6 +21,8 @@ export interface CompiledTarget {
 }
 
 export interface CompiledRule {
+  context: string
+  id: string
   ignores: CompiledPattern[]
   pattern: CompiledPattern
   targets: CompiledTarget[]

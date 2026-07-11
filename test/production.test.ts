@@ -5,7 +5,8 @@ import { window } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
-import { isRegexExecutionAbortedError, RegexExecutor } from '../src/regex-worker'
+import { createRegexWorker, isRegexExecutionAbortedError, RegexExecutor } from '../src/regex-worker'
+import { RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
 import { LatestTaskScheduler } from '../src/scheduler'
 
 class MockEditor {
@@ -31,6 +32,8 @@ describe('regex configuration', () => {
     expect(() => compilePattern(['(?=foo)', 'm'])).not.toThrow()
     expect(() => compilePattern(['(?<=foo)\\w+', 'm'])).not.toThrow()
     expect(() => compilePattern(['(?<name>foo)', 'm'])).not.toThrow()
+    expect(compilePattern(['foo', 'y']).flags).toContain('y')
+    expect(compilePattern(['foo', '']).flags).toBe('gd')
   })
 
   it('warns about nested quantifiers without rejecting valid syntax', () => {
@@ -68,6 +71,17 @@ describe('regex configuration', () => {
   it('keeps explicit match arrays unambiguous', () => {
     const compiled = compileConfig({ vue: { light: { red: { match: ['foo', 'gm'] } } } })
     expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern.source)).toEqual(['foo', 'gm'])
+  })
+
+  it('preserves React aliases across JSX and TSX', () => {
+    const compiled = compileConfig({
+      react: { light: { red: ['react-rule'] } },
+      javascriptreact: { light: { blue: ['jsx-rule'] } },
+      typescriptreact: { light: { green: ['tsx-rule'] } },
+    })
+    const sources = (language: string) => getRulesForLanguage(compiled, language, false).map(rule => rule.pattern.source)
+    expect(sources('javascriptreact')).toEqual(['react-rule', 'jsx-rule', 'tsx-rule'])
+    expect(sources('typescriptreact')).toEqual(['react-rule', 'jsx-rule', 'tsx-rule'])
   })
 
   it('survives malformed colors and matchCss while compiling valid siblings', () => {
@@ -121,6 +135,25 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: '😀a',
     })).resolves.toEqual([{ spans: [[0, 0]] }, { spans: [[2, 2]] }])
+    executor.dispose()
+  })
+
+  it('preserves sticky matching semantics', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: compilePattern(['foo', 'y']),
+      targetGroups: [0],
+      text: 'xfoo',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: compilePattern(['foo', 'y']),
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([{ spans: [[0, 3]] }])
     executor.dispose()
   })
 
@@ -188,6 +221,43 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('recovers after a synchronous worker factory failure', async () => {
+    let attempts = 0
+    const executor = new RegexExecutor(500, () => {
+      attempts++
+      if (attempts === 1)
+        throw new Error('ERR_WORKER_INIT_FAILED')
+      return createRegexWorker()
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request)).rejects.toThrow('ERR_WORKER_INIT_FAILED')
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
+  it('recovers after a synchronous postMessage failure', async () => {
+    let attempts = 0
+    const executor = new RegexExecutor(500, () => {
+      attempts++
+      if (attempts > 1)
+        return createRegexWorker()
+      return {
+        off: vi.fn(),
+        on: vi.fn(),
+        once: vi.fn(),
+        postMessage: () => { throw new Error('postMessage failed') },
+        terminate: vi.fn(async () => 0),
+        unref: vi.fn(),
+      } as any
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request)).rejects.toThrow('postMessage failed')
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
   it('removes cancelled queued work and aborts active work', async () => {
     const executor = new RegexExecutor(1_000)
     const slow = { ignores: [], maxMatches: 10, pattern: { source: '(a+)+$', flags: 'gd' }, targetGroups: [0], text: `${'a'.repeat(20_000)}b` }
@@ -203,6 +273,34 @@ describe('regex execution', () => {
     await expect(active).rejects.toSatisfy(isRegexExecutionAbortedError)
     expect(executor.pendingCount).toBe(0)
     executor.dispose()
+  })
+})
+
+describe('runtime controls', () => {
+  it('isolates rule cooldowns by document and restores them after expiry', () => {
+    let now = 0
+    const registry = new RuleFailureRegistry<object>(1_000, () => now)
+    const documentA = {}
+    const documentB = {}
+    registry.recordFailure(documentA, 'rule')
+    expect(registry.isDisabled(documentA, 'rule')).toBe(true)
+    expect(registry.isDisabled(documentB, 'rule')).toBe(false)
+    now = 1_001
+    expect(registry.isDisabled(documentA, 'rule')).toBe(false)
+    registry.recordFailure(documentA, 'rule')
+    expect(registry.isDisabled(documentA, 'rule')).toBe(true)
+  })
+
+  it('enforces strict range and duration budgets', () => {
+    let now = 0
+    const ranges = new RefreshBudget(2, 1_000, () => now)
+    expect(ranges.consumeRange()).toBe(true)
+    expect(ranges.consumeRange()).toBe(true)
+    expect(ranges.consumeRange()).toBe(false)
+
+    const time = new RefreshBudget(10, 1_000, () => now)
+    now = 1_000
+    expect(time.exhausted).toBe(true)
   })
 })
 
@@ -282,12 +380,11 @@ describe('decoration lifecycle', () => {
   it('reuses types, batches ranges, and never recreates after dispose', () => {
     const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
       ['a', { color: 'red' }],
-      ['b', { color: 'red' }],
       ['c', { color: 'blue' }],
     ]))
     const editor = new MockEditor() as any
     for (let iteration = 0; iteration < 100; iteration++) {
-      manager.apply(editor, new Map([['a', [range(0, 1)]], ['b', [range(2, 3)]], ['c', [range(4, 5)]]]))
+      manager.apply(editor, new Map([['a', [range(0, 1), range(2, 3)]], ['c', [range(4, 5)]]]))
     }
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
     const created = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)

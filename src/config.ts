@@ -144,7 +144,13 @@ function compileStyleRules(
       const pattern = compilePattern(input)
       if (!isRegexSafe(new RegExp(pattern.source, pattern.flags)))
         config.warnings.push(`Potentially expensive regular expression for ${context}: ${pattern.source}`)
-      return [{ ignores, pattern, targets }]
+      return [{
+        context,
+        id: `${context}:${pattern.source}/${pattern.flags}`,
+        ignores,
+        pattern,
+        targets,
+      }]
     }
     catch (error) {
       config.warnings.push(`Invalid pattern for ${context}: ${error instanceof Error ? error.message : String(error)}`)
@@ -203,11 +209,12 @@ export function createExcludeFilter(value: unknown): (path: string) => boolean {
 }
 
 export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean): CompiledRule[] {
+  const reactAliases = ['react', 'javascriptreact', 'typescriptreact']
   const aliases: Record<string, string[]> = {
-    javascriptreact: ['react', 'javascriptreact'],
+    javascriptreact: reactAliases,
     markdown: ['md', 'markdown'],
     plaintext: ['txt', 'plaintext'],
-    typescriptreact: ['react', 'typescriptreact'],
+    typescriptreact: reactAliases,
     vuetsx: ['vue', 'vuetsx'],
   }
   const languages = aliases[languageId] ?? [languageId]

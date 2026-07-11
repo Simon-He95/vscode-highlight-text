@@ -11,9 +11,11 @@ The Vitest suite imports production modules directly and covers:
 - configuration compilation, malformed settings, RegExp flags, and legacy tuple compatibility;
 - lookarounds, named groups, and advisory-only expensive-pattern diagnostics;
 - Unicode-aware zero-width matching;
-- worker-enforced timeout, active cancellation, queued cancellation, and recovery;
+- worker-enforced timeout, active cancellation, queued cancellation, and constructor/postMessage failure recovery;
+- sticky and explicit-empty flag semantics;
 - engine-provided indices for repeated, optional, and lookbehind captures;
-- rule-local `ignoreReg` behavior;
+- React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
+- document-scoped rule cooldowns and total refresh range/time budgets;
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
@@ -22,7 +24,7 @@ The Vitest suite imports production modules directly and covers:
 CI additionally:
 
 - runs tests on Linux Node 20/22, macOS Node 22, and Windows Node 22;
-- checks the built extension with Node 16.14.2, matching the runtime shipped by the minimum supported VS Code 1.77;
+- executes the production `RegexExecutor` worker on Node 16.14.2, matching the runtime shipped by the minimum supported VS Code 1.77;
 - packages a VSIX and verifies `extension/dist/index.js` is present.
 
 `pnpm run pack` invokes the VS Code `vscode:prepublish` hook, runs all checks, rebuilds the extension, and packages the VSIX.

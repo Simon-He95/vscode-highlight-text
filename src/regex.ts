@@ -8,20 +8,20 @@ export function normalizeFlags(flags = 'gm'): string {
     throw new Error(`Invalid regular expression flags: ${flags}`)
 
   const normalized = new Set(flags)
-  normalized.delete('y')
   normalized.add('g')
   normalized.add('d')
   return [...normalized].join('')
 }
 
 export function compilePattern(input: PatternInput): CompiledPattern {
-  const [source, flags] = typeof input === 'string' ? [input, 'gm'] : input
+  const source = typeof input === 'string' ? input : input[0]
+  const flags = typeof input === 'string' ? 'gm' : input[1]
   if (!source)
     throw new Error('Regular expression pattern cannot be empty')
   if (source.length > MAX_PATTERN_LENGTH)
     throw new Error(`Regular expression pattern exceeds ${MAX_PATTERN_LENGTH} characters`)
 
-  const normalizedFlags = normalizeFlags(flags || 'gm')
+  const normalizedFlags = normalizeFlags(flags)
   const regex = new RegExp(source, normalizedFlags)
   return { source: regex.source, flags: normalizedFlags }
 }

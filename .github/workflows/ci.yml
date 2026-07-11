@@ -61,13 +61,28 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: pnpm exec tsup src/regex-worker.ts --format cjs --target node16 --out-dir temp/runtime-smoke
       - uses: actions/setup-node@v4
         with:
           node-version: 16.14.2
-      - name: Verify minimum VS Code runtime features
+      - name: Execute regex worker on the minimum VS Code runtime
         run: |
           node --check dist/index.js
-          node -e "const { Worker } = require('node:worker_threads'); const match = /a/d.exec('a'); if (!match.indices || typeof Worker !== 'function' || typeof AbortController !== 'function') process.exit(1)"
+          node - <<'NODE'
+          const { RegexExecutor } = require('./temp/runtime-smoke/regex-worker.js')
+          const executor = new RegexExecutor(500)
+          executor.execute({
+            ignores: [],
+            maxMatches: 10,
+            pattern: { source: '(?=.)', flags: 'gdu' },
+            targetGroups: [0],
+            text: '😀a',
+          }).then((results) => {
+            executor.dispose()
+            if (JSON.stringify(results) !== JSON.stringify([{ spans: [[0, 0]] }, { spans: [[2, 2]] }]))
+              process.exit(1)
+          }).catch(() => process.exit(1))
+          NODE
 
   package:
     runs-on: ubuntu-latest

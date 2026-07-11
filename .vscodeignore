@@ -5,6 +5,7 @@ test
 .vscode
 assets
 scripts
+temp
 .eslintcache
 .gitignore
 *.tgz

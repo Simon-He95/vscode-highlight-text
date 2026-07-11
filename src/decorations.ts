@@ -1,18 +1,6 @@
 import type { DecorationRenderOptions, Range, TextEditor, TextEditorDecorationType } from 'vscode'
 import { window } from 'vscode'
 
-function styleKey(value: unknown): string {
-  if (Array.isArray(value))
-    return `[${value.map(styleKey).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, child]) => `${JSON.stringify(key)}:${styleKey(child)}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value)
-}
-
 export class DecorationManager {
   private disposed = false
   private readonly editors = new Set<TextEditor>()
@@ -24,19 +12,18 @@ export class DecorationManager {
     if (this.disposed)
       return
     this.editors.add(editor)
-    const rangesByType = new Map<string, Range[]>()
     for (const [styleId, ranges] of rangesByStyle) {
       const options = this.styles.get(styleId)
       if (!options)
         continue
-      const key = styleKey(options)
-      rangesByType.set(key, [...(rangesByType.get(key) ?? []), ...ranges])
-      if (!this.types.has(key))
-        this.types.set(key, window.createTextEditorDecorationType(options))
+      if (!this.types.has(styleId))
+        this.types.set(styleId, window.createTextEditorDecorationType(options))
+      editor.setDecorations(this.types.get(styleId)!, ranges)
     }
-
-    for (const [key, type] of this.types)
-      editor.setDecorations(type, rangesByType.get(key) ?? [])
+    for (const [styleId, type] of this.types) {
+      if (!rangesByStyle.has(styleId))
+        editor.setDecorations(type, [])
+    }
   }
 
   clear(editor: TextEditor): void {
