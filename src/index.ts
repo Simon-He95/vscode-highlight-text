@@ -7,7 +7,7 @@ import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vs
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
 import { isRegexExecutionAbortedError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
-import { BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
+import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
 
@@ -106,15 +106,33 @@ async function scanRule(
     : []))
 }
 
+const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
+
 export function getRuleLanguageId(document: TextDocument): string {
   if (document.languageId !== 'vue')
     return document.languageId
+  const cached = languageDetectionCache.get(document)
+  if (cached?.version === document.version && cached.languageId === document.languageId)
+    return cached.result
+
   const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
-  const previewEnd = document.positionAt(Math.min(documentEnd, 100_000))
-  const preview = document.getText(new Range(new Position(0, 0), previewEnd))
-  return /<(?:script|template)\b[^>]*\slang\s*=\s*["']tsx["']/i.test(preview)
-    ? 'vuetsx'
-    : document.languageId
+  const blockSize = 100_000
+  let carry = ''
+  let result = document.languageId
+  for (let start = 0; start < documentEnd; start += blockSize) {
+    const end = Math.min(documentEnd, start + blockSize)
+    const chunk = document.getText(new Range(document.positionAt(start), document.positionAt(end)))
+    const candidate = carry + chunk
+    if (/<(?:script|template)\b[^>]*\slang\s*=\s*["']tsx["']/i.test(candidate)) {
+      result = 'vuetsx'
+      break
+    }
+    const lastOpen = candidate.lastIndexOf('<')
+    const lastClose = candidate.lastIndexOf('>')
+    carry = lastOpen > lastClose ? candidate.slice(Math.max(lastOpen, candidate.length - 10_000)) : ''
+  }
+  languageDetectionCache.set(document, { languageId: document.languageId, result, version: document.version })
+  return result
 }
 
 function getRules(config: CompiledConfig, document: TextDocument): CompiledRule[] {
@@ -125,7 +143,17 @@ export function activate(context: ExtensionContext): void {
   let disposed = false
   let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
   let shouldProcess = getExcludeFilter()
-  const manager = new DecorationManager(compiled.styles)
+  let initialManagerError: unknown
+  let manager: DecorationManager
+  try {
+    manager = new DecorationManager(compiled.styles)
+  }
+  catch (error) {
+    initialManagerError = error
+    compiled = { languages: new Map(), styles: new Map(), warnings: compiled.warnings }
+    manager = new DecorationManager(new Map())
+  }
+  let ruleSnapshots = new WeakMap<TextEditor, Map<string, Map<string, VscodeRange[]>>>()
   const executors = new Map<TextEditor, RegexExecutor>()
   const getExecutor = (editor: TextEditor) => {
     const existing = executors.get(editor)
@@ -144,6 +172,8 @@ export function activate(context: ExtensionContext): void {
     void window.showWarningMessage(`vscode-highlight-text: ${warning}`)
   }
   compiled.warnings.forEach(warnOnce)
+  if (initialManagerError)
+    warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`)
 
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
@@ -164,13 +194,15 @@ export function activate(context: ExtensionContext): void {
       if (isCurrent()) {
         executors.get(editor)?.dispose()
         executors.delete(editor)
+        ruleSnapshots.delete(editor)
         manager.clear(editor)
       }
       return
     }
 
-    const rangesByStyle = new Map<string, VscodeRange[]>()
-    const preserveStyleIds = new Set<string>()
+    const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, Map<string, VscodeRange[]>>()
+    const scannedSnapshots = new Map<string, Map<string, VscodeRange[]>>()
+    const failedRuleIds = new Set<string>()
     const executor = getExecutor(editor)
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
     let budgetExceeded = false
@@ -185,13 +217,10 @@ export function activate(context: ExtensionContext): void {
           break
         }
         if (failures.isDisabled(document, rule.id)) {
-          rule.targets.forEach(target => preserveStyleIds.add(target.styleId))
+          failedRuleIds.add(rule.id)
           continue
         }
-        const maxMatches = Math.max(1, Math.min(
-          MAX_MATCHES_PER_RULE,
-          Math.ceil(budget.remainingRanges / Math.max(1, rule.targets.length)),
-        ))
+        const maxMatches = MAX_MATCHES_PER_RULE
         try {
           const matches = await scanRule(executor, rule, slice, task.signal, maxMatches)
           if (!isCurrent())
@@ -201,16 +230,18 @@ export function activate(context: ExtensionContext): void {
               budgetExceeded = true
               break
             }
-            const ranges = rangesByStyle.get(match.styleId) ?? []
+            const ruleSnapshot = scannedSnapshots.get(rule.id) ?? new Map<string, VscodeRange[]>()
+            const ranges = ruleSnapshot.get(match.styleId) ?? []
             ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
-            rangesByStyle.set(match.styleId, ranges)
+            ruleSnapshot.set(match.styleId, ranges)
+            scannedSnapshots.set(rule.id, ruleSnapshot)
           }
         }
         catch (error) {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
-          rule.targets.forEach(target => preserveStyleIds.add(target.styleId))
+          failedRuleIds.add(rule.id)
           if (isRegexExecutionTimeoutError(error)) {
             failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
@@ -236,8 +267,21 @@ export function activate(context: ExtensionContext): void {
       warnOnce(`Highlight refresh budget reached in ${document.uri.fsPath}; previous complete highlights were preserved`)
       return
     }
-    if (isCurrent())
-      manager.apply(editor, rangesByStyle, preserveStyleIds)
+    if (isCurrent()) {
+      const nextSnapshots = new Map<string, Map<string, VscodeRange[]>>()
+      for (const rule of rules) {
+        const snapshot = failedRuleIds.has(rule.id) ? previousSnapshots.get(rule.id) : scannedSnapshots.get(rule.id) ?? new Map()
+        if (snapshot)
+          nextSnapshots.set(rule.id, snapshot)
+      }
+      const rangesByStyle = aggregateSnapshots(nextSnapshots.values(), MAX_TOTAL_RANGES)
+      if (!rangesByStyle) {
+        warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; previous complete highlights were preserved`)
+        return
+      }
+      ruleSnapshots.set(editor, nextSnapshots)
+      manager.apply(editor, rangesByStyle)
+    }
   }
 
   const scheduler = new LatestTaskScheduler<TextEditor>(
@@ -253,15 +297,19 @@ export function activate(context: ExtensionContext): void {
         scheduler.remove(editor)
         executors.get(editor)?.dispose()
         executors.delete(editor)
+        ruleSnapshots.delete(editor)
         manager.clear(editor)
       }
     }
     window.visibleTextEditors.forEach(editor => scheduler.schedule(editor, immediate))
   }
 
-  const rebuildAndRefresh = () => {
-    window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
-    manager.rebuild(compiled.styles)
+  const refreshForTheme = () => {
+    for (const editor of window.visibleTextEditors) {
+      scheduler.invalidate(editor)
+      manager.clear(editor)
+    }
+    ruleSnapshots = new WeakMap()
     refreshVisibleEditors(true)
   }
 
@@ -279,6 +327,7 @@ export function activate(context: ExtensionContext): void {
           scheduler.invalidate(editor)
           executors.get(editor)?.dispose()
           executors.delete(editor)
+          ruleSnapshots.delete(editor)
           manager.clear(editor)
         }
       }
@@ -300,15 +349,30 @@ export function activate(context: ExtensionContext): void {
     workspace.onDidChangeConfiguration((event) => {
       if (!event.affectsConfiguration('vscode-highlight-text'))
         return
-      compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
-      shouldProcess = getExcludeFilter()
+      const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
+      const nextFilter = getExcludeFilter()
+      let nextManager: DecorationManager
+      try {
+        nextManager = new DecorationManager(nextCompiled.styles)
+      }
+      catch (error) {
+        warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
+      const previousManager = manager
+      manager = nextManager
+      compiled = nextCompiled
+      shouldProcess = nextFilter
+      ruleSnapshots = new WeakMap()
       failures.clear()
       executors.forEach(executor => executor.resetCache())
       warned.clear()
       compiled.warnings.forEach(warnOnce)
-      rebuildAndRefresh()
+      previousManager.dispose()
+      refreshVisibleEditors(true)
     }),
-    window.onDidChangeActiveColorTheme(() => rebuildAndRefresh()),
+    window.onDidChangeActiveColorTheme(() => refreshForTheme()),
     commands.registerCommand('vscode-highlight-text.selectTemplate', async () => {
       const select = await createSelect(Object.keys(templates))
       if (!select)

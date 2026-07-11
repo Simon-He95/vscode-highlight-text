@@ -80,6 +80,13 @@ describe('vue TSX language detection', () => {
     const template = createEditor('<template lang = "tsx"><div /></template>')
     template.document.languageId = 'vue'
     expect(getRuleLanguageId(template.document as any)).toBe('vuetsx')
+
+    const lateScript = createEditor(`${'x'.repeat(100_001)}<script setup lang="tsx"></script>`, 'late-vue')
+    lateScript.document.languageId = 'vue'
+    expect(getRuleLanguageId(lateScript.document as any)).toBe('vuetsx')
+    const reads = lateScript.document.getText.mock.calls.length
+    expect(getRuleLanguageId(lateScript.document as any)).toBe('vuetsx')
+    expect(lateScript.document.getText).toHaveBeenCalledTimes(reads)
   })
 })
 
@@ -98,6 +105,16 @@ describe('extension activation orchestration', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     __resetVscodeMock()
+  })
+
+  it('stays active with an empty manager when initial type creation fails', () => {
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => { throw new Error('invalid initial style') })
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    expect(() => activate(context)).not.toThrow()
+    expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Failed to apply initial configuration'))
+    disposeContext(context)
   })
 
   it('highlights the initial visible range and independently updates split editors', async () => {
@@ -188,6 +205,34 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('preserves failed rule ranges independently from successful rules sharing a style', async () => {
+    configuration.rules = {
+      plaintext: {
+        light: {
+          red: ['SAFE', '(a+)+$'],
+        },
+      },
+    }
+    const editor = createEditor('SAFE aaaa', 'rule-snapshot')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const redType = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).find(type => type.options.color === 'red')
+    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(redType, expect.arrayContaining([expect.anything(), expect.anything()])))
+
+    editor.setDecorations.mockClear()
+    editor.setText(`SAFE ${'a'.repeat(20_000)}b`)
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('exceeded 500ms')))
+    await waitFor(() => {
+      const update = editor.setDecorations.mock.calls.find(([type, ranges]) => type === redType && ranges.length > 0)
+      expect(update?.[1]).toHaveLength(2)
+    })
+
+    disposeContext(context)
+  })
+
   it('preserves the previous complete decoration snapshot when timeouts exhaust the refresh budget', async () => {
     configuration.rules = {
       plaintext: {
@@ -242,7 +287,38 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('clears old decorations on exclude and rebuilds decoration types on theme change', async () => {
+  it('keeps the previous configuration active when manager creation fails', async () => {
+    const editor = createEditor('foo', 'transaction')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    const previousTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    const partialType = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => partialType as any)
+      .mockImplementationOnce(() => { throw new Error('invalid next style') })
+    configuration.rules = {
+      plaintext: { light: { green: ['foo'], yellow: ['bar'] } },
+    }
+
+    await __events.configuration.fire({ affectsConfiguration: () => true })
+    expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Failed to apply configuration'))
+    expect(partialType.dispose).toHaveBeenCalledTimes(1)
+    previousTypes.forEach(type => expect(type.dispose).not.toHaveBeenCalled())
+
+    editor.setDecorations.mockClear()
+    editor.setText('foo')
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+
+    await __events.configuration.fire({ affectsConfiguration: () => true })
+    await waitFor(() => previousTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1)))
+    disposeContext(context)
+  })
+
+  it('clears old decorations on exclude and reuses decoration types on theme change', async () => {
     const editor = createEditor('foo')
     window.visibleTextEditors = [editor] as any
     const context = { subscriptions: [] } as unknown as ExtensionContext
@@ -251,11 +327,12 @@ describe('extension activation orchestration', () => {
     await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2))
     const firstTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
 
+    editor.setDecorations.mockClear()
     window.activeColorTheme = { kind: 2 }
     await __events.theme.fire(window.activeColorTheme)
-    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(4))
-    firstTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
+    firstTypes.forEach(type => expect(type.dispose).not.toHaveBeenCalled())
 
     editor.setDecorations.mockClear()
     vi.mocked(window.createTextEditorDecorationType).mockClear()

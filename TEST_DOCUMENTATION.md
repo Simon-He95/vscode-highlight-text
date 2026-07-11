@@ -15,11 +15,11 @@ The Vitest suite imports production modules directly and covers:
 - sticky and explicit-empty flag semantics;
 - engine-provided indices for repeated, optional, and lookbehind captures;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
-- document-scoped rule cooldowns, rule-local limit failures, and total refresh range/time budgets;
+- document-scoped rule cooldowns, per-rule range snapshots, fixed rule limits, and total refresh range/time budgets;
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
-- initial activation, split editors, visible-editor removal, language close/open changes, Vue TSX detection, theme rebuild, and exclude cleanup;
+- initial activation fallback, transactional configuration changes, split editors, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-cache state, cache generations, and reuse of unchanged slice text inside the worker;
 - per-editor executors and deterministic, transactional decoration type creation, batching, reuse, cleanup, and disposal.
@@ -28,7 +28,7 @@ CI additionally:
 
 - runs tests on Linux Node 20/22, macOS Node 22, and Windows Node 22;
 - executes the production `RegexExecutor` worker on Node 16.14.2, matching the runtime shipped by the minimum supported VS Code 1.77;
-- packages a VSIX and verifies `extension/dist/index.js` is present.
+- packages a VSIX and verifies `extension/dist/index.js` and `extension/README_zh.md` are present.
 
 `pnpm run pack` invokes the VS Code `vscode:prepublish` hook, runs all checks, rebuilds the extension, and packages the VSIX.
 

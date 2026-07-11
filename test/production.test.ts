@@ -8,7 +8,7 @@ import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle
 import { DecorationManager } from '../src/decorations'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, RegexExecutor } from '../src/regex-worker'
-import { BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
+import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
 import { LatestTaskScheduler } from '../src/scheduler'
 
 class MockEditor {
@@ -392,6 +392,16 @@ describe('regex execution', () => {
 })
 
 describe('runtime controls', () => {
+  it('enforces the range limit after old and new rule snapshots are combined', () => {
+    const oldSnapshot = new Map([['red', Array.from({ length: 6 }, (_, index) => index)]])
+    const newSnapshot = new Map([['blue', Array.from({ length: 5 }, (_, index) => index)]])
+    expect(aggregateSnapshots([oldSnapshot, newSnapshot], 10)).toBeUndefined()
+    expect(aggregateSnapshots([oldSnapshot, newSnapshot], 11)).toEqual(new Map([
+      ['red', [0, 1, 2, 3, 4, 5]],
+      ['blue', [0, 1, 2, 3, 4]],
+    ]))
+  })
+
   it('bounds remembered warning keys', () => {
     const values = new BoundedSet<string>(2)
     expect(values.add('first')).toBe(true)

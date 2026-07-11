@@ -12,6 +12,7 @@ temp
 *.vsix
 *.md
 !README.md
+!README_zh.md
 pnpm-lock.yaml
 pnpm-workspace.yaml
 tsconfig.json

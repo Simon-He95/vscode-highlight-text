@@ -1,3 +1,25 @@
+export function aggregateSnapshots<Value>(
+  snapshots: Iterable<Map<string, Value[]>>,
+  maxValues: number,
+): Map<string, Value[]> | undefined {
+  const collected = [...snapshots]
+  let total = 0
+  for (const snapshot of collected) {
+    for (const values of snapshot.values()) {
+      total += values.length
+      if (total > maxValues)
+        return
+    }
+  }
+
+  const aggregated = new Map<string, Value[]>()
+  for (const snapshot of collected) {
+    for (const [key, values] of snapshot)
+      aggregated.set(key, [...(aggregated.get(key) ?? []), ...values])
+  }
+  return aggregated
+}
+
 export interface RuleFailureState {
   disabledUntil: number
   failures: number

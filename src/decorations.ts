@@ -11,7 +11,7 @@ export class DecorationManager {
     this.types = this.createTypes(styles)
   }
 
-  apply(editor: TextEditor, rangesByStyle: Map<string, Range[]>, preserveStyleIds = new Set<string>()): void {
+  apply(editor: TextEditor, rangesByStyle: Map<string, Range[]>): void {
     if (this.disposed)
       return
     this.editors.add(editor)
@@ -24,10 +24,6 @@ export class DecorationManager {
         continue
       editor.setDecorations(type, ranges)
       current.add(styleId)
-    }
-    for (const styleId of preserveStyleIds) {
-      if (!current.has(styleId) && previous.has(styleId))
-        current.add(styleId)
     }
     for (const styleId of previous) {
       if (!current.has(styleId))
@@ -43,17 +39,6 @@ export class DecorationManager {
       this.clearStyle(editor, styleId)
     this.activeStyles.delete(editor)
     this.editors.delete(editor)
-  }
-
-  rebuild(styles: Map<string, DecorationRenderOptions>): void {
-    if (this.disposed)
-      return
-    const nextTypes = this.createTypes(styles)
-    for (const editor of [...this.editors])
-      this.clear(editor)
-    this.disposeTypes(this.types)
-    this.styles = styles
-    this.types = nextTypes
   }
 
   dispose(): void {
