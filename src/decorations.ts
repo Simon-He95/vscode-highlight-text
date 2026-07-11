@@ -14,12 +14,15 @@ function styleKey(value: unknown): string {
 }
 
 export class DecorationManager {
+  private disposed = false
   private readonly editors = new Set<TextEditor>()
   private readonly types = new Map<string, TextEditorDecorationType>()
 
   constructor(private styles: Map<string, DecorationRenderOptions>) {}
 
   apply(editor: TextEditor, rangesByStyle: Map<string, Range[]>): void {
+    if (this.disposed)
+      return
     this.editors.add(editor)
     const rangesByType = new Map<string, Range[]>()
     for (const [styleId, ranges] of rangesByStyle) {
@@ -37,12 +40,16 @@ export class DecorationManager {
   }
 
   clear(editor: TextEditor): void {
+    if (this.disposed)
+      return
     for (const type of this.types.values())
       editor.setDecorations(type, [])
     this.editors.delete(editor)
   }
 
   rebuild(styles: Map<string, DecorationRenderOptions>): void {
+    if (this.disposed)
+      return
     for (const editor of [...this.editors])
       this.clear(editor)
     for (const type of this.types.values())
@@ -52,6 +59,9 @@ export class DecorationManager {
   }
 
   dispose(): void {
+    if (this.disposed)
+      return
+    this.disposed = true
     for (const editor of this.editors) {
       for (const type of this.types.values())
         editor.setDecorations(type, [])

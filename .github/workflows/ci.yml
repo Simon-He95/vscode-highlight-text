@@ -50,6 +50,25 @@ jobs:
       - run: pnpm test
       - run: pnpm typecheck
 
+  runtime-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 16.14.2
+      - name: Verify minimum VS Code runtime features
+        run: |
+          node --check dist/index.js
+          node -e "const { Worker } = require('node:worker_threads'); const match = /a/d.exec('a'); if (!match.indices || typeof Worker !== 'function' || typeof AbortController !== 'function') process.exit(1)"
+
   package:
     runs-on: ubuntu-latest
     steps:

@@ -2,7 +2,7 @@ import type { Worker as WorkerType } from 'node:worker_threads'
 import type { CompiledPattern, MatchResult } from './type'
 import { Worker } from 'node:worker_threads'
 
-interface WorkerRequest {
+export interface WorkerRequest {
   ignores: CompiledPattern[]
   maxMatches: number
   pattern: CompiledPattern
@@ -10,8 +10,26 @@ interface WorkerRequest {
   text: string
 }
 
+interface PendingJob {
+  onAbort?: () => void
+  reject: (error: Error) => void
+  request: WorkerRequest
+  resolve: (results: MatchResult[]) => void
+  signal?: AbortSignal
+}
+
 const WORKER_SOURCE = String.raw`
 const { parentPort } = require('node:worker_threads')
+
+function advanceStringIndex(text, index, unicode) {
+  if (!unicode)
+    return index + 1
+  const first = text.charCodeAt(index)
+  if (first < 0xD800 || first > 0xDBFF || index + 1 >= text.length)
+    return index + 1
+  const second = text.charCodeAt(index + 1)
+  return second >= 0xDC00 && second <= 0xDFFF ? index + 2 : index + 1
+}
 
 function collect(regex, text, limit, onMatch) {
   regex.lastIndex = 0
@@ -21,7 +39,7 @@ function collect(regex, text, limit, onMatch) {
     onMatch(match)
     count++
     if (match.index === regex.lastIndex)
-      regex.lastIndex++
+      regex.lastIndex = advanceStringIndex(text, regex.lastIndex, regex.unicode || regex.unicodeSets)
   }
 }
 
@@ -69,86 +87,151 @@ parentPort.on('message', ({ id, request }) => {
 })
 `
 
+export class RegexExecutionAbortedError extends Error {
+  constructor(message = 'Regular expression execution was cancelled') {
+    super(message)
+    this.name = 'RegexExecutionAbortedError'
+  }
+}
+
+export function isRegexExecutionAbortedError(error: unknown): error is RegexExecutionAbortedError {
+  return error instanceof RegexExecutionAbortedError
+}
+
 export class RegexExecutor {
+  private active?: PendingJob
+  private activeCancel?: (error: Error) => void
   private disposed = false
   private nextId = 0
-  private queue = Promise.resolve()
+  private readonly pending: PendingJob[] = []
   private worker?: WorkerType
 
   constructor(private readonly timeoutMs = 500) {}
 
-  execute(request: WorkerRequest): Promise<MatchResult[]> {
-    if (this.disposed)
-      return Promise.reject(new Error('Regular expression executor has been disposed'))
-    const result = this.queue.then(() => this.run(request))
-    this.queue = result.then(() => undefined, () => undefined)
-    return result
+  get pendingCount(): number {
+    return this.pending.length + (this.active ? 1 : 0)
+  }
+
+  execute(request: WorkerRequest, signal?: AbortSignal): Promise<MatchResult[]> {
+    if (this.disposed || signal?.aborted)
+      return Promise.reject(new RegexExecutionAbortedError())
+
+    return new Promise((resolve, reject) => {
+      const job: PendingJob = { request, resolve, reject, signal }
+      if (signal) {
+        job.onAbort = () => this.cancel(job)
+        signal.addEventListener('abort', job.onAbort, { once: true })
+      }
+      this.pending.push(job)
+      this.drain()
+    })
   }
 
   dispose(): void {
+    if (this.disposed)
+      return
     this.disposed = true
+    this.activeCancel?.(new RegexExecutionAbortedError('Regular expression executor was disposed'))
+    for (const job of this.pending.splice(0)) {
+      this.removeAbortListener(job)
+      job.reject(new RegexExecutionAbortedError('Regular expression executor was disposed'))
+    }
     void this.worker?.terminate()
     this.worker = undefined
+  }
+
+  private cancel(job: PendingJob): void {
+    if (this.active === job) {
+      this.activeCancel?.(new RegexExecutionAbortedError())
+      return
+    }
+    const index = this.pending.indexOf(job)
+    if (index < 0)
+      return
+    this.pending.splice(index, 1)
+    this.removeAbortListener(job)
+    job.reject(new RegexExecutionAbortedError())
   }
 
   private createWorker(): WorkerType {
     const worker = new Worker(WORKER_SOURCE, { eval: true })
     worker.unref()
-    worker.once('exit', () => {
-      if (this.worker === worker)
-        this.worker = undefined
-    })
     this.worker = worker
     return worker
   }
 
-  private run(request: WorkerRequest): Promise<MatchResult[]> {
-    if (this.disposed)
-      return Promise.reject(new Error('Regular expression executor has been disposed'))
+  private drain(): void {
+    if (this.disposed || this.active)
+      return
+    const job = this.pending.shift()
+    if (!job)
+      return
+    if (job.signal?.aborted) {
+      this.removeAbortListener(job)
+      job.reject(new RegexExecutionAbortedError())
+      this.drain()
+      return
+    }
+    this.active = job
+    this.run(job)
+  }
+
+  private removeAbortListener(job: PendingJob): void {
+    if (job.signal && job.onAbort)
+      job.signal.removeEventListener('abort', job.onAbort)
+  }
+
+  private run(job: PendingJob): void {
     const worker = this.worker ?? this.createWorker()
     const id = ++this.nextId
+    let settled = false
+    let timer: ReturnType<typeof setTimeout>
+    let onError: (error: Error) => void
+    let onExit: () => void
+    let onMessage: (message: { error?: string, id: number, results: MatchResult[] }) => void
 
-    return new Promise((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout>
-
-      function cleanup() {
-        clearTimeout(timer)
-        worker.off('message', onMessage)
-        worker.off('error', onError)
-        worker.off('exit', onExit)
-      }
-      function fail(error: Error) {
-        cleanup()
-        reject(error)
-      }
-      function onError(error: Error) {
-        fail(error)
-      }
-      function onExit() {
-        fail(new Error('Regular expression worker stopped unexpectedly'))
-      }
-      function onMessage(message: { error?: string, id: number, results: MatchResult[] }) {
-        if (message.id !== id)
-          return
-        cleanup()
-        if (message.error)
-          reject(new Error(message.error))
-        else
-          resolve(message.results)
-      }
-
-      timer = setTimeout(() => {
-        cleanup()
+    const cleanup = () => {
+      clearTimeout(timer)
+      worker.off('message', onMessage)
+      worker.off('error', onError)
+      worker.off('exit', onExit)
+      this.removeAbortListener(job)
+      this.activeCancel = undefined
+      if (this.active === job)
+        this.active = undefined
+    }
+    const finish = (error?: Error, results?: MatchResult[], terminate = false) => {
+      if (settled)
+        return
+      settled = true
+      cleanup()
+      if (terminate) {
         if (this.worker === worker)
           this.worker = undefined
         void worker.terminate()
-        reject(new Error(`Regular expression execution exceeded ${this.timeoutMs}ms`))
-      }, this.timeoutMs)
+      }
+      if (error)
+        job.reject(error)
+      else
+        job.resolve(results ?? [])
+      this.drain()
+    }
+    onError = (error: Error) => finish(error, undefined, true)
+    onExit = () => finish(new Error('Regular expression worker stopped unexpectedly'), undefined, true)
+    onMessage = (message: { error?: string, id: number, results: MatchResult[] }) => {
+      if (message.id !== id)
+        return
+      finish(message.error ? new Error(message.error) : undefined, message.results)
+    }
 
-      worker.on('message', onMessage)
-      worker.once('error', onError)
-      worker.once('exit', onExit)
-      worker.postMessage({ id, request })
-    })
+    this.activeCancel = error => finish(error, undefined, true)
+    timer = setTimeout(
+      () => finish(new Error(`Regular expression execution exceeded ${this.timeoutMs}ms`), undefined, true),
+      this.timeoutMs,
+    )
+    worker.on('message', onMessage)
+    worker.once('error', onError)
+    worker.once('exit', onExit)
+    worker.postMessage({ id, request: job.request })
   }
 }

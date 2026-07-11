@@ -1,8 +1,8 @@
 import type { DecorationRenderOptions } from 'vscode'
-import type { CompiledConfig, CompiledRule, PatternInput, UserConfig } from './type'
+import type { CompiledConfig, CompiledRule, CompiledTarget, PatternInput, UserConfig } from './type'
 import { createFilter } from '@rollup/pluginutils'
 import { DecorationRangeBehavior } from 'vscode'
-import { compilePattern, normalizePatterns } from './regex'
+import { compilePattern, isPatternTuple, isRegexSafe, normalizePatterns } from './regex'
 
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
 
@@ -36,9 +36,64 @@ function addStyle(config: CompiledConfig, style: DecorationRenderOptions): strin
   return id
 }
 
+function isStyleObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function compileTargets(
+  option: Record<string, unknown> | undefined,
+  base: Record<string, unknown>,
+  commonStyle: DecorationRenderOptions,
+  context: string,
+  config: CompiledConfig,
+): CompiledTarget[] | undefined {
+  if (option && 'matchCss' in option) {
+    if (!Array.isArray(option.matchCss)) {
+      config.warnings.push(`Invalid matchCss for ${context}: expected an array of style objects`)
+      return
+    }
+    const styles = option.matchCss.filter(isStyleObject)
+    if (styles.length !== option.matchCss.length) {
+      config.warnings.push(`Invalid matchCss entries for ${context}: expected style objects`)
+      return
+    }
+    if (!styles.length) {
+      config.warnings.push(`Invalid matchCss for ${context}: at least one style is required`)
+      return
+    }
+    return styles.map((style, index) => ({
+      groupIndex: index + 1,
+      styleId: addStyle(config, normalizeStyle({ ...base, ...style })),
+    }))
+  }
+
+  if (option && 'colors' in option) {
+    if (!Array.isArray(option.colors)) {
+      config.warnings.push(`Invalid colors for ${context}: expected an array of strings`)
+      return
+    }
+    const colors = option.colors.filter((value): value is string => typeof value === 'string')
+    if (colors.length !== option.colors.length) {
+      config.warnings.push(`Invalid colors entries for ${context}: expected strings`)
+      return
+    }
+    if (!colors.length) {
+      config.warnings.push(`Invalid colors for ${context}: at least one color is required`)
+      return
+    }
+    return colors.map((color, index) => ({
+      groupIndex: index + 1,
+      styleId: addStyle(config, normalizeStyle({ ...base, color })),
+    }))
+  }
+
+  return [{ styleId: addStyle(config, commonStyle) }]
+}
+
 function compileStyleRules(
   color: string,
   raw: unknown,
+  context: string,
   config: CompiledConfig,
 ): CompiledRule[] {
   const base: Record<string, unknown> = {
@@ -46,50 +101,70 @@ function compileStyleRules(
     isWholeLine: false,
     rangeBehavior: DecorationRangeBehavior.ClosedClosed,
   }
-  const option = raw && !Array.isArray(raw) && typeof raw === 'object' ? raw as UserConfig : undefined
-  const patterns = normalizePatterns(option?.match ?? raw)
-  if (!patterns.length)
+  const option = isStyleObject(raw) ? raw as UserConfig & Record<string, unknown> : undefined
+  let patterns: PatternInput[]
+  if (option) {
+    patterns = normalizePatterns(option.match)
+  }
+  else if (isPatternTuple(raw)) {
+    patterns = [raw]
+    config.warnings.push(`Legacy pattern tuple for ${context}: wrap it in an array, for example [["pattern", "gm"]]`)
+  }
+  else {
+    patterns = normalizePatterns(raw)
+  }
+  if (!patterns.length) {
+    config.warnings.push(`Invalid match patterns for ${context}`)
     return []
+  }
 
   const commonStyle = normalizeStyle({ ...base, ...(option ?? {}) })
-  const targets = option?.matchCss
-    ? option.matchCss.map((style, index) => ({
-        groupIndex: index + 1,
-        styleId: addStyle(config, normalizeStyle({ ...base, ...style })),
-      }))
-    : option?.colors
-      ? option.colors.map((targetColor, index) => ({
-          groupIndex: index + 1,
-          styleId: addStyle(config, normalizeStyle({ ...base, color: targetColor })),
-        }))
-      : [{ styleId: addStyle(config, commonStyle) }]
+  const targets = compileTargets(option, base, commonStyle, context, config)
+  if (!targets)
+    return []
 
-  const ignores = normalizePatterns(option?.ignoreReg)
-    .flatMap((input) => {
+  let ignores: ReturnType<typeof compilePattern>[] = []
+  if (option && 'ignoreReg' in option) {
+    const ignorePatterns = normalizePatterns(option.ignoreReg)
+    if (!ignorePatterns.length && option.ignoreReg !== undefined)
+      config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
+    ignores = ignorePatterns.flatMap((input) => {
       try {
         return [compilePattern(input)]
       }
       catch (error) {
-        config.warnings.push(error instanceof Error ? error.message : String(error))
+        config.warnings.push(`Invalid ignoreReg for ${context}: ${error instanceof Error ? error.message : String(error)}`)
         return []
       }
     })
+  }
 
-  return patterns.flatMap((input: PatternInput) => {
+  return patterns.flatMap((input) => {
     try {
-      return [{ ignores, pattern: compilePattern(input), targets }]
+      const pattern = compilePattern(input)
+      if (!isRegexSafe(new RegExp(pattern.source, pattern.flags)))
+        config.warnings.push(`Potentially expensive regular expression for ${context}: ${pattern.source}`)
+      return [{ ignores, pattern, targets }]
     }
     catch (error) {
-      config.warnings.push(error instanceof Error ? error.message : String(error))
+      config.warnings.push(`Invalid pattern for ${context}: ${error instanceof Error ? error.message : String(error)}`)
       return []
     }
   })
 }
 
-function compileMode(raw: unknown, config: CompiledConfig): CompiledRule[] {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig): CompiledRule[] {
+  if (!isStyleObject(raw))
     return []
-  return Object.entries(raw).flatMap(([color, value]) => compileStyleRules(color, value, config))
+  return Object.entries(raw).flatMap(([color, value]) => {
+    try {
+      return compileStyleRules(color, value, `${language}.${mode}.${color}`, config)
+    }
+    catch (error) {
+      config.warnings.push(`Invalid configuration for ${language}.${mode}.${color}: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
+  })
 }
 
 export function compileConfig(raw: unknown): CompiledConfig {
@@ -98,20 +173,19 @@ export function compileConfig(raw: unknown): CompiledConfig {
     styles: new Map(),
     warnings: [],
   }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+  if (!isStyleObject(raw)) {
     result.warnings.push('vscode-highlight-text.rules must be an object')
     return result
   }
 
   for (const [languageKey, modes] of Object.entries(raw)) {
-    if (!modes || typeof modes !== 'object' || Array.isArray(modes)) {
+    if (!isStyleObject(modes)) {
       result.warnings.push(`Rules for ${languageKey} must be an object`)
       continue
     }
-    const value = modes as Record<string, unknown>
     const compiled = {
-      dark: compileMode(value.dark, result),
-      light: compileMode(value.light, result),
+      dark: compileMode(modes.dark, languageKey, 'dark', result),
+      light: compileMode(modes.light, languageKey, 'light', result),
     }
     for (const language of languageKey.split('|').map(item => item.trim()).filter(Boolean)) {
       const existing = result.languages.get(language)

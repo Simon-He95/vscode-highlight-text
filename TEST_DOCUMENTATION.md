@@ -1,30 +1,30 @@
 # Test coverage
 
-The Vitest suite imports and exercises production modules directly. Run it with:
-
-```bash
-pnpm test
-```
-
-The current suite covers:
-
-- configuration compilation and RegExp flag normalization;
-- acceptance of lookarounds and named capture groups;
-- rejection of common nested-quantifier patterns;
-- pattern strings, pattern tuples, and pattern arrays;
-- immutable `background` to `backgroundColor` normalization;
-- rule-local `ignoreReg` intervals;
-- engine-provided capture indices for repeated, nested, optional, and lookbehind groups;
-- compatibility with the existing first-participating-capture default;
-- a worker-enforced timeout for catastrophic backtracking and worker recovery;
-- batched decoration ranges, decoration type reuse, rebuild cleanup, and disposal.
-
-The repository quality gate is:
+Run the repository quality gate with:
 
 ```bash
 pnpm check
 ```
 
-This runs ESLint, TypeScript type checking, and Vitest. `pnpm run pack` also invokes the VS Code `vscode:prepublish` hook, rebuilds the extension, and packages a VSIX.
+The Vitest suite imports production modules directly and covers:
 
-The tests use a focused VS Code API mock and are not a replacement for an Extension Host smoke test. Event wiring and rendering in a real Extension Host remain integration-level concerns.
+- configuration compilation, malformed settings, RegExp flags, and legacy tuple compatibility;
+- lookarounds, named groups, and advisory-only expensive-pattern diagnostics;
+- Unicode-aware zero-width matching;
+- worker-enforced timeout, active cancellation, queued cancellation, and recovery;
+- engine-provided indices for repeated, optional, and lookbehind captures;
+- rule-local `ignoreReg` behavior;
+- latest-wins, single-flight scheduling and immediate stale-task invalidation;
+- removal of 1,000 historical editor states;
+- disposal during asynchronous work without late decoration creation;
+- decoration batching, type reuse, idempotent cleanup, and disposal.
+
+CI additionally:
+
+- runs tests on Linux Node 20/22, macOS Node 22, and Windows Node 22;
+- checks the built extension with Node 16.14.2, matching the runtime shipped by the minimum supported VS Code 1.77;
+- packages a VSIX and verifies `extension/dist/index.js` is present.
+
+`pnpm run pack` invokes the VS Code `vscode:prepublish` hook, runs all checks, rebuilds the extension, and packages the VSIX.
+
+The focused VS Code API mock is not a full Extension Host. Rendering behavior in a real Extension Host remains an integration-level smoke-test opportunity.

@@ -1,11 +1,13 @@
 import type { ExtensionContext, TextDocument, TextEditor, Range as VscodeRange } from 'vscode'
+import type { LatestTaskContext } from './scheduler'
 import type { CompiledConfig, CompiledRule } from './type'
 import { createSelect, getConfiguration, setConfiguration } from '@vscode-use/utils'
 import { deepMerge } from 'lazy-js-utils'
 import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
-import { RegexExecutor } from './regex-worker'
+import { isRegexExecutionAbortedError, RegexExecutor } from './regex-worker'
+import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
 
 const MAX_SCAN_SIZE = 200_000
@@ -79,6 +81,7 @@ async function scanRule(
   executor: RegexExecutor,
   rule: CompiledRule,
   slice: ScanSlice,
+  signal: AbortSignal,
 ): Promise<Array<{ end: number, start: number, styleId: string }>> {
   const matches = await executor.execute({
     ignores: rule.ignores,
@@ -86,7 +89,7 @@ async function scanRule(
     pattern: rule.pattern,
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
-  })
+  }, signal)
 
   return matches.flatMap(match => match.spans.flatMap((span, index) => span
     ? [{
@@ -112,103 +115,106 @@ export function activate(context: ExtensionContext): void {
   let shouldProcess = getExcludeFilter()
   const manager = new DecorationManager(compiled.styles)
   const executor = new RegexExecutor()
-  const timers = new Map<TextEditor, ReturnType<typeof setTimeout>>()
-  const generations = new Map<TextEditor, number>()
   const disabledRules = new Set<CompiledRule>()
   const warned = new Set<string>()
 
-  const warnOnce = (message: string) => {
-    if (warned.has(message))
+  const warnOnce = (warning: string) => {
+    if (disposed || warned.has(warning))
       return
-    warned.add(message)
-    void window.showWarningMessage(`vscode-highlight-text: ${message}`)
+    warned.add(warning)
+    void window.showWarningMessage(`vscode-highlight-text: ${warning}`)
   }
   compiled.warnings.forEach(warnOnce)
 
-  const updateEditor = async (editor: TextEditor) => {
-    const generation = (generations.get(editor) ?? 0) + 1
-    generations.set(editor, generation)
-    const rules = getRules(compiled, editor.document)
-    if (!window.visibleTextEditors.includes(editor) || !shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length || !rules.length) {
-      manager.clear(editor)
+  const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
+    const document = editor.document
+    const documentVersion = document.version
+    const isCurrent = () => task.isCurrent()
+      && !disposed
+      && editor.document === document
+      && document.version === documentVersion
+      && !document.isClosed
+      && window.visibleTextEditors.includes(editor)
+
+    if (!isCurrent())
+      return
+    const rules = getRules(compiled, document)
+    if (!shouldProcess(document.uri.path) || !editor.visibleRanges.length || !rules.length) {
+      if (isCurrent())
+        manager.clear(editor)
       return
     }
 
     const rangesByStyle = new Map<string, VscodeRange[]>()
-    try {
-      for (const slice of getScanSlices(editor)) {
-        for (const rule of rules) {
-          if (disabledRules.has(rule))
-            continue
-          try {
-            const matches = await scanRule(executor, rule, slice)
-            if (disposed || generations.get(editor) !== generation || editor.document.isClosed)
-              return
-            for (const match of matches) {
-              const ranges = rangesByStyle.get(match.styleId) ?? []
-              ranges.push(new Range(editor.document.positionAt(match.start), editor.document.positionAt(match.end)))
-              rangesByStyle.set(match.styleId, ranges)
-            }
-          }
-          catch (error) {
-            disabledRules.add(rule)
-            warnOnce(error instanceof Error ? error.message : String(error))
+    for (const slice of getScanSlices(editor)) {
+      if (!isCurrent())
+        return
+      for (const rule of rules) {
+        if (!isCurrent())
+          return
+        if (disabledRules.has(rule))
+          continue
+        try {
+          const matches = await scanRule(executor, rule, slice, task.signal)
+          if (!isCurrent())
+            return
+          for (const match of matches) {
+            const ranges = rangesByStyle.get(match.styleId) ?? []
+            ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
+            rangesByStyle.set(match.styleId, ranges)
           }
         }
+        catch (error) {
+          if (!isCurrent() || isRegexExecutionAbortedError(error))
+            return
+          disabledRules.add(rule)
+          warnOnce(error instanceof Error ? error.message : String(error))
+        }
       }
+    }
+
+    if (isCurrent())
       manager.apply(editor, rangesByStyle)
-    }
-    catch (error) {
-      warnOnce(error instanceof Error ? error.message : String(error))
-      manager.clear(editor)
-    }
   }
 
-  const schedule = (editor: TextEditor, immediate = false) => {
-    const timer = timers.get(editor)
-    if (timer)
-      clearTimeout(timer)
-    if (immediate) {
-      timers.delete(editor)
-      void updateEditor(editor)
-      return
-    }
-    timers.set(editor, setTimeout(() => {
-      timers.delete(editor)
-      void updateEditor(editor)
-    }, UPDATE_DELAY))
-  }
+  const scheduler = new LatestTaskScheduler<TextEditor>(
+    updateEditor,
+    UPDATE_DELAY,
+    error => warnOnce(error instanceof Error ? error.message : String(error)),
+  )
 
-  const refreshVisibleEditors = () => {
+  const refreshVisibleEditors = (immediate = true) => {
     const visible = new Set(window.visibleTextEditors)
-    for (const editor of generations.keys()) {
+    for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
-        const timer = timers.get(editor)
-        if (timer)
-          clearTimeout(timer)
-        timers.delete(editor)
-        generations.set(editor, (generations.get(editor) ?? 0) + 1)
+        scheduler.remove(editor)
         manager.clear(editor)
       }
     }
-    window.visibleTextEditors.forEach(editor => schedule(editor, true))
+    window.visibleTextEditors.forEach(editor => scheduler.schedule(editor, immediate))
+  }
+
+  const rebuildAndRefresh = () => {
+    window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
+    manager.rebuild(compiled.styles)
+    refreshVisibleEditors(true)
   }
 
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((event) => {
       for (const editor of window.visibleTextEditors) {
         if (editor.document === event.document && event.contentChanges.length)
-          schedule(editor)
+          scheduler.schedule(editor)
       }
     }),
     window.onDidChangeActiveTextEditor((editor) => {
       if (editor)
-        schedule(editor, true)
+        scheduler.schedule(editor, true)
       else
         refreshVisibleEditors()
     }),
-    window.onDidChangeTextEditorVisibleRanges(event => schedule(event.textEditor)),
-    window.onDidChangeVisibleTextEditors(refreshVisibleEditors),
+    window.onDidChangeTextEditorVisibleRanges(event => scheduler.schedule(event.textEditor)),
+    window.onDidChangeVisibleTextEditors(() => refreshVisibleEditors()),
     workspace.onDidChangeConfiguration((event) => {
       if (!event.affectsConfiguration('vscode-highlight-text'))
         return
@@ -217,13 +223,9 @@ export function activate(context: ExtensionContext): void {
       disabledRules.clear()
       warned.clear()
       compiled.warnings.forEach(warnOnce)
-      manager.rebuild(compiled.styles)
-      refreshVisibleEditors()
+      rebuildAndRefresh()
     }),
-    window.onDidChangeActiveColorTheme(() => {
-      manager.rebuild(compiled.styles)
-      refreshVisibleEditors()
-    }),
+    window.onDidChangeActiveColorTheme(() => rebuildAndRefresh()),
     commands.registerCommand('vscode-highlight-text.selectTemplate', async () => {
       const select = await createSelect(Object.keys(templates))
       if (!select)
@@ -234,10 +236,7 @@ export function activate(context: ExtensionContext): void {
     {
       dispose: () => {
         disposed = true
-        for (const timer of timers.values())
-          clearTimeout(timer)
-        timers.clear()
-        generations.clear()
+        scheduler.dispose()
         executor.dispose()
         manager.dispose()
       },
