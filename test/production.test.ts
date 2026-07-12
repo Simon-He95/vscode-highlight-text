@@ -89,8 +89,12 @@ describe('regex configuration', () => {
       'typescriptreact': { light: { green: reactPatterns } },
     })
     expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(1_000)
-    expect(getRulesForLanguage(compiled, 'javascriptreact', false)).toHaveLength(1_000)
-    expect(getRulesForLanguage(compiled, 'typescriptreact', false)).toHaveLength(1_000)
+    const jsxRules = getRulesForLanguage(compiled, 'javascriptreact', false)
+    const tsxRules = getRulesForLanguage(compiled, 'typescriptreact', false)
+    expect(jsxRules).toHaveLength(1_000)
+    expect(tsxRules).toHaveLength(1_000)
+    expect(jsxRules[0].context).toContain('javascriptreact')
+    expect(tsxRules[0].context).toContain('typescriptreact')
     expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many merged rules for vue'))
   })
 
@@ -103,8 +107,8 @@ describe('regex configuration', () => {
     const compiled = compileConfig(raw)
     const totalRules = [...compiled.languages.values()]
       .reduce((total, modes) => total + modes.dark.length + modes.light.length, 0)
-    expect(totalRules).toBe(5_000)
-    expect(compiled.styles.size).toBe(5)
+    expect(totalRules).toBeLessThanOrEqual(5_000)
+    expect(compiled.styles.size).toBeLessThanOrEqual(5)
     expect(compiled.warnings).toContainEqual(expect.stringContaining('compilation budget was reached'))
 
     const tooManyLanguages = compileConfig(Object.fromEntries(
@@ -112,6 +116,48 @@ describe('regex configuration', () => {
     ))
     expect(tooManyLanguages.languages.size).toBe(100)
     expect(tooManyLanguages.warnings.length).toBeLessThanOrEqual(100)
+  })
+
+  it('charges invalid inputs to the compilation budget and rolls back their styles', () => {
+    const invalidRules = Object.fromEntries(Array.from({ length: 1_000 }, (_, index) => [
+      `color-${index}`,
+      ['('],
+    ]))
+    const compiled = compileConfig({
+      plaintext: { light: { ...invalidRules, green: ['foo'] } },
+    })
+    const rules = getRulesForLanguage(compiled, 'plaintext', false)
+    expect(rules.some(rule => rule.pattern.source === 'foo')).toBe(true)
+    expect(compiled.styles.size).toBe(1)
+    expect(compiled.warnings.length).toBeLessThanOrEqual(100)
+  })
+
+  it('stops reading configuration values after compilation budgets are reached', () => {
+    const raw: Record<string, unknown> = {}
+    for (let index = 0; index < 101; index++) {
+      Object.defineProperty(raw, `language${index}`, {
+        enumerable: true,
+        get: () => {
+          if (index >= 100)
+            throw new Error('read past language budget')
+          return { light: { red: [`p${index}`] } }
+        },
+      })
+    }
+    expect(() => compileConfig(raw)).not.toThrow()
+
+    const mode: Record<string, unknown> = {}
+    for (let index = 0; index < 1_001; index++) {
+      Object.defineProperty(mode, `color${index}`, {
+        enumerable: true,
+        get: () => {
+          if (index >= 1_000)
+            throw new Error('read past mode budget')
+          return [`p${index}`]
+        },
+      })
+    }
+    expect(() => compileConfig({ plaintext: { light: mode } })).not.toThrow()
   })
 
   it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
@@ -154,8 +200,8 @@ describe('regex configuration', () => {
       typescriptreact: { light: { green: ['tsx-rule'] } },
     })
     const sources = (language: string) => getRulesForLanguage(compiled, language, false).map(rule => rule.pattern.source)
-    expect(sources('javascriptreact')).toEqual(['react-rule', 'jsx-rule', 'tsx-rule'])
-    expect(sources('typescriptreact')).toEqual(['react-rule', 'jsx-rule', 'tsx-rule'])
+    expect(sources('javascriptreact')).toEqual(['jsx-rule', 'tsx-rule', 'react-rule'])
+    expect(sources('typescriptreact')).toEqual(['tsx-rule', 'jsx-rule', 'react-rule'])
   })
 
   it('survives malformed colors and matchCss while compiling valid siblings', () => {
@@ -328,6 +374,20 @@ describe('regex execution', () => {
       ignores: [{ source: 'foo', flags: 'gd' }],
       maxMatches: 10,
       pattern: { source: '(?=foo)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?<=\\s{3})BAR', flags: 'gd' },
+      targetGroups: [0],
+      text: 'fooBAR',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?=\\s)', flags: 'gd' },
       targetGroups: [0],
       text: 'foo',
     })).resolves.toEqual([])

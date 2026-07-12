@@ -198,7 +198,7 @@ describe('extension activation orchestration', () => {
     editor.setText(`foo${'x'.repeat(200_001)}`)
     await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Visible scan exceeds 200000 characters')))
-    expect(editor.setDecorations).not.toHaveBeenCalled()
+    expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
     disposeContext(context)
   })
 
@@ -323,7 +323,7 @@ describe('extension activation orchestration', () => {
       const timeoutWarnings = vi.mocked(window.showWarningMessage).mock.calls.filter(([message]) => String(message).includes('exceeded 500ms'))
       expect(timeoutWarnings).toHaveLength(2)
     }, 3_000)
-    expect(editor.setDecorations).not.toHaveBeenCalled()
+    expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
 
     disposeContext(context)
   })

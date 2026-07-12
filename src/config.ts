@@ -6,12 +6,29 @@ import { compilePattern, isPatternTuple, isRegexSafe, normalizePatterns } from '
 
 const MAX_IGNORE_PATTERNS_PER_RULE = 100
 const MAX_LANGUAGES = 100
+const MAX_LANGUAGE_KEY_LENGTH = 1000
 const MAX_RULES_PER_MODE = 1000
 const MAX_TARGETS_PER_RULE = 100
 const MAX_TOTAL_RULES = 5000
 const MAX_TOTAL_STYLES = 1000
 const MAX_WARNINGS = 100
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
+
+interface CompilationBudget {
+  remainingInputs: number
+}
+
+function normalizePatternsWithBudget(value: unknown, budget: CompilationBudget, maxItems: number): PatternInput[] {
+  if (budget.remainingInputs <= 0)
+    return []
+  if (!Array.isArray(value)) {
+    budget.remainingInputs--
+    return normalizePatterns(value)
+  }
+  const count = Math.min(value.length, maxItems, budget.remainingInputs)
+  budget.remainingInputs -= count
+  return normalizePatterns(value.slice(0, count))
+}
 
 function createWarnings(): string[] {
   const warnings: string[] = []
@@ -126,6 +143,7 @@ function compileStyleRules(
   raw: unknown,
   context: string,
   config: CompiledConfig,
+  budget: CompilationBudget,
 ): CompiledRule[] {
   const base: Record<string, unknown> = {
     color,
@@ -135,10 +153,10 @@ function compileStyleRules(
   const option = isStyleObject(raw) ? raw as UserConfig & Record<string, unknown> : undefined
   let patterns: PatternInput[]
   if (option) {
-    patterns = normalizePatterns(option.match)
+    patterns = normalizePatternsWithBudget(option.match, budget, MAX_RULES_PER_MODE)
   }
   else {
-    patterns = normalizePatterns(raw)
+    patterns = normalizePatternsWithBudget(raw, budget, MAX_RULES_PER_MODE)
     if (isPatternTuple(raw))
       config.warnings.push(`Ambiguous rule for ${context}: interpreted as two patterns; wrap it in an array, for example [["pattern", "gm"]], to pass flags`)
   }
@@ -166,7 +184,7 @@ function compileStyleRules(
       config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
       return []
     }
-    const ignorePatterns = normalizePatterns(option.ignoreReg)
+    const ignorePatterns = normalizePatternsWithBudget(option.ignoreReg, budget, MAX_IGNORE_PATTERNS_PER_RULE)
     ignores = ignorePatterns.flatMap((input) => {
       try {
         const pattern = compilePattern(input)
@@ -201,20 +219,40 @@ function compileStyleRules(
   })
 }
 
-function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig, maxRules = MAX_RULES_PER_MODE): CompiledRule[] {
+function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig, budget: CompilationBudget, maxRules = MAX_RULES_PER_MODE): CompiledRule[] {
   if (!isStyleObject(raw))
     return []
   const rules: CompiledRule[] = []
-  for (const [color, value] of Object.entries(raw)) {
+  for (const color in raw) {
+    if (!Object.prototype.hasOwnProperty.call(raw, color))
+      continue
+    if (budget.remainingInputs <= 0) {
+      config.warnings.push('Configuration input budget was reached; remaining style entries were skipped')
+      break
+    }
     if (rules.length >= maxRules) {
       config.warnings.push(`Too many rules for ${language}.${mode}: at most ${MAX_RULES_PER_MODE} rules are allowed`)
       break
     }
+    budget.remainingInputs--
+    const value = raw[color]
+    const previousStyleIds = new Set(config.styles.keys())
     try {
       const remaining = maxRules - rules.length
-      rules.push(...compileStyleRules(color, value, `${language}.${mode}.${color}`, config).slice(0, remaining))
+      const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, config, budget).slice(0, remaining)
+      if (!compiled.length) {
+        for (const styleId of config.styles.keys()) {
+          if (!previousStyleIds.has(styleId))
+            config.styles.delete(styleId)
+        }
+      }
+      rules.push(...compiled)
     }
     catch (error) {
+      for (const styleId of config.styles.keys()) {
+        if (!previousStyleIds.has(styleId))
+          config.styles.delete(styleId)
+      }
       config.warnings.push(`Invalid configuration for ${language}.${mode}.${color}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -233,36 +271,56 @@ export function compileConfig(raw: unknown): CompiledConfig {
   }
 
   let compiledRuleCount = 0
+  const compilationBudget: CompilationBudget = { remainingInputs: MAX_TOTAL_RULES }
   let processedLanguageKeys = 0
-  for (const [languageKey, modes] of Object.entries(raw)) {
-    if (processedLanguageKeys >= MAX_LANGUAGES || compiledRuleCount >= MAX_TOTAL_RULES) {
+  for (const languageKey in raw) {
+    if (!Object.prototype.hasOwnProperty.call(raw, languageKey))
+      continue
+    if (processedLanguageKeys >= MAX_LANGUAGES || compiledRuleCount >= MAX_TOTAL_RULES || compilationBudget.remainingInputs <= 0) {
       result.warnings.push('Configuration compilation budget was reached; remaining language keys were skipped')
       break
     }
     processedLanguageKeys++
+    compilationBudget.remainingInputs--
+    if (languageKey.length > MAX_LANGUAGE_KEY_LENGTH) {
+      result.warnings.push(`Language key exceeds ${MAX_LANGUAGE_KEY_LENGTH} characters and was skipped`)
+      continue
+    }
+    const modes = raw[languageKey]
     if (!isStyleObject(modes)) {
       result.warnings.push(`Rules for ${languageKey} must be an object`)
       continue
     }
     let availableLanguages = MAX_LANGUAGES - result.languages.size
-    const languages = languageKey.split('|').map(item => item.trim()).filter(Boolean).filter((language) => {
-      if (result.languages.has(language))
-        return true
-      if (availableLanguages <= 0)
-        return false
-      availableLanguages--
-      return true
-    })
+    const languages: string[] = []
+    let segmentStart = 0
+    for (let index = 0; index <= languageKey.length && languages.length < MAX_LANGUAGES; index++) {
+      if (index < languageKey.length && languageKey[index] !== '|')
+        continue
+      const language = languageKey.slice(segmentStart, index).trim()
+      segmentStart = index + 1
+      if (!language || languages.includes(language))
+        continue
+      if (result.languages.has(language)) {
+        languages.push(language)
+      }
+      else if (availableLanguages > 0) {
+        availableLanguages--
+        languages.push(language)
+      }
+      if (availableLanguages <= 0 && languages.every(item => !result.languages.has(item)))
+        break
+    }
     if (!languages.length) {
       result.warnings.push(`Too many languages: at most ${MAX_LANGUAGES} languages are allowed`)
       continue
     }
 
     const darkLimit = Math.min(MAX_RULES_PER_MODE, MAX_TOTAL_RULES - compiledRuleCount)
-    const dark = compileMode(modes.dark, languageKey, 'dark', result, darkLimit)
+    const dark = compileMode(modes.dark, languageKey, 'dark', result, compilationBudget, darkLimit)
     compiledRuleCount += dark.length
     const lightLimit = Math.min(MAX_RULES_PER_MODE, MAX_TOTAL_RULES - compiledRuleCount)
-    const light = compileMode(modes.light, languageKey, 'light', result, lightLimit)
+    const light = compileMode(modes.light, languageKey, 'light', result, compilationBudget, lightLimit)
     compiledRuleCount += light.length
     const compiled = { dark, light }
 
@@ -313,13 +371,12 @@ export function createExcludeFilter(value: unknown): (path: string) => boolean {
 }
 
 export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean): CompiledRule[] {
-  const reactAliases = ['react', 'javascriptreact', 'typescriptreact']
   const aliases: Record<string, string[]> = {
-    javascriptreact: reactAliases,
-    markdown: ['md', 'markdown'],
-    plaintext: ['txt', 'plaintext'],
-    typescriptreact: reactAliases,
-    vuetsx: ['vue', 'vuetsx'],
+    javascriptreact: ['javascriptreact', 'typescriptreact', 'react'],
+    markdown: ['markdown', 'md'],
+    plaintext: ['plaintext', 'txt'],
+    typescriptreact: ['typescriptreact', 'javascriptreact', 'react'],
+    vuetsx: ['vuetsx', 'vue'],
   }
   const languages = aliases[languageId] ?? [languageId]
   const mode = dark ? 'dark' : 'light'

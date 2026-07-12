@@ -42,11 +42,13 @@ const defaultConfig = {
 
 interface RuleSnapshot {
   documentVersion: number
+  scanKey: string
   rangesByStyle: Map<string, VscodeRange[]>
 }
 
 interface ScanPlan {
   complete: boolean
+  scanKey: string
   slices: ScanSlice[]
 }
 
@@ -82,11 +84,13 @@ function getScanSlices(editor: TextEditor): ScanPlan {
       merged.push({ ...range })
   }
 
+  const scanKey = merged.map(range => `${range.start}:${range.end}`).join(',')
   const totalSize = merged.reduce((total, range) => total + range.end - range.start, 0)
   if (totalSize > MAX_SCAN_SIZE)
-    return { complete: false, slices: [] }
+    return { complete: false, scanKey, slices: [] }
   return {
     complete: true,
+    scanKey,
     slices: merged.map(({ start, end }) => ({
       start,
       end,
@@ -233,12 +237,22 @@ export function activate(context: ExtensionContext): void {
     }
 
     const scanPlan = getScanSlices(editor)
+    const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
+    const canPreservePrevious = previousSnapshots.size > 0 && [...previousSnapshots.values()].every(
+      snapshot => snapshot.documentVersion === documentVersion && snapshot.scanKey === scanPlan.scanKey,
+    )
+    const clearStaleSnapshot = () => {
+      if (canPreservePrevious)
+        return
+      ruleSnapshots.delete(editor)
+      manager.clear(editor)
+    }
     if (!scanPlan.complete) {
-      warnOnce(`Visible scan exceeds ${MAX_SCAN_SIZE} characters in ${document.uri.fsPath}; previous complete highlights were preserved`)
+      clearStaleSnapshot()
+      warnOnce(`Visible scan exceeds ${MAX_SCAN_SIZE} characters in ${document.uri.fsPath}; stale highlights were cleared`)
       return
     }
 
-    const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
     const scannedSnapshots = new Map<string, Map<string, VscodeRange[]>>()
     const scannedRangeKeys = new Set<string>()
     const failedRuleIds = new Set<string>()
@@ -314,7 +328,8 @@ export function activate(context: ExtensionContext): void {
     if (budget.timeExceeded)
       budgetExceeded = true
     if (budgetExceeded) {
-      warnOnce(`Highlight refresh budget reached in ${document.uri.fsPath}; previous complete highlights were preserved`)
+      clearStaleSnapshot()
+      warnOnce(`Highlight refresh budget reached in ${document.uri.fsPath}; stale highlights were cleared when necessary`)
       return
     }
     if (isCurrent()) {
@@ -322,8 +337,8 @@ export function activate(context: ExtensionContext): void {
       for (const rule of rules) {
         const previous = previousSnapshots.get(rule.id)
         const snapshot = failedRuleIds.has(rule.id)
-          ? previous?.documentVersion === documentVersion ? previous : undefined
-          : { documentVersion, rangesByStyle: scannedSnapshots.get(rule.id) ?? new Map() }
+          ? previous?.documentVersion === documentVersion && previous.scanKey === scanPlan.scanKey ? previous : undefined
+          : { documentVersion, scanKey: scanPlan.scanKey, rangesByStyle: scannedSnapshots.get(rule.id) ?? new Map() }
         if (snapshot)
           nextSnapshots.set(rule.id, snapshot)
       }
@@ -333,7 +348,8 @@ export function activate(context: ExtensionContext): void {
         (_styleId, range) => `${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`,
       )
       if (!rangesByStyle) {
-        warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; previous complete highlights were preserved`)
+        clearStaleSnapshot()
+        warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; stale highlights were cleared when necessary`)
         return
       }
       ruleSnapshots.set(editor, nextSnapshots)
