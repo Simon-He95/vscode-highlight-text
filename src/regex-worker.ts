@@ -174,17 +174,19 @@ parentPort.on('message', ({ id, request }) => {
       return request.targetGroups.map((groupIndex) => {
         let index = groupIndex
         if (index === undefined) {
-          if (match.length === 1)
-            return match.indices && match.indices[0]
+          if (match.length === 1) {
+            const fullSpan = match.indices && match.indices[0]
+            return fullSpan && fullSpan[0] !== fullSpan[1] ? fullSpan : undefined
+          }
           for (let candidate = 1; candidate < match.length; candidate++) {
             const candidateSpan = match.indices && match.indices[candidate]
-            if (candidateSpan && candidateSpan[0] !== candidateSpan[1])
-              return candidateSpan
+            if (candidateSpan)
+              return candidateSpan[0] === candidateSpan[1] ? undefined : candidateSpan
           }
           return undefined
         }
         const span = match.indices && match.indices[index]
-        if (!span || span[0] < 0)
+        if (!span || span[0] < 0 || span[0] === span[1])
           return undefined
         return span
       })
@@ -219,14 +221,11 @@ parentPort.on('message', ({ id, request }) => {
           acceptedSpans = originalSpans
           regex.lastIndex = originalFullSpan[1]
         }
-        else if (overlapping) {
-          regex.lastIndex = Math.max(
-            overlapping[1],
-            advanceStringIndex(text, match.index, regex.unicode || regex.unicodeSets),
-          )
-          return
-        }
         else {
+          const nextIndex = advanceStringIndex(text, fullSpan[0], regex.unicode || regex.unicodeSets)
+          regex.lastIndex = overlapping && fullSpan[0] >= overlapping[0]
+            ? Math.max(overlapping[1], nextIndex)
+            : nextIndex
           return
         }
       }

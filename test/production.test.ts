@@ -171,6 +171,12 @@ describe('regex configuration', () => {
     expect(() => compileConfig({ plaintext: { light: mode } })).not.toThrow()
   })
 
+  it('warns when a style pattern array is truncated', () => {
+    const compiled = compileConfig({ plaintext: { light: { red: Array.from({ length: 1_001 }, (_, index) => `p-${index}`) } } })
+    expect(getRulesForLanguage(compiled, 'plaintext', false)).toHaveLength(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many match patterns'))
+  })
+
   it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
     const compiled = compileConfig({
       vue: {
@@ -272,6 +278,9 @@ describe('regex configuration', () => {
     expect(filter('/workspace/project/dist/index.js')).toBe(false)
     expect(filter('/workspace/project/dist/keep/index.js')).toBe(true)
     expect(filter('/workspace/project/src/index.js')).toBe(true)
+    const windowsFilter = createExcludeFilter(['C:\\Repo\\dist\\**'])
+    expect(windowsFilter('/c:/repo/dist/index.js')).toBe(false)
+    expect(windowsFilter('c:\\REPO\\src\\index.js')).toBe(true)
   })
 
   it('normalizes styles, empty excludes, and rule-local ignores', () => {
@@ -300,10 +309,22 @@ describe('regex execution', () => {
     await expect(executor.execute({
       ignores: [],
       maxMatches: 10,
-      pattern: { source: '(?=.)', flags: 'gdu' },
-      targetGroups: [0],
+      pattern: { source: '(?=(.))', flags: 'gdu' },
+      targetGroups: [1],
       text: '😀a',
-    })).resolves.toEqual([{ spans: [[0, 0]] }, { spans: [[2, 2]] }])
+    })).resolves.toEqual([{ spans: [[0, 2]] }, { spans: [[2, 3]] }])
+    executor.dispose()
+  })
+
+  it('skips a zero-width full match without capture groups', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(?=.)', flags: 'gdu' },
+      targetGroups: [undefined],
+      text: '😀a',
+    })).resolves.toEqual([])
     executor.dispose()
   })
 
@@ -361,7 +382,7 @@ describe('regex execution', () => {
 
   it('preserves legacy default capture behavior for absent and empty groups', async () => {
     const executor = new RegexExecutor(500)
-    for (const source of ['(foo)?bar', '()bar']) {
+    for (const source of ['(foo)?bar', '()bar', '()(bar)']) {
       await expect(executor.execute({
         ignores: [],
         maxMatches: 10,
@@ -579,6 +600,18 @@ describe('regex execution', () => {
       targetGroups: [1],
       text: 'x b',
     })).resolves.toEqual([{ spans: [[2, 3]] }])
+    executor.dispose()
+  })
+
+  it('advances from a masked false candidate to find an internal legal alternative', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'XXX', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo(?=\\s{3}bar)|oo', flags: 'gd' },
+      targetGroups: [0],
+      text: 'fooXXXbar',
+    })).resolves.toEqual([{ spans: [[1, 3]] }])
     executor.dispose()
   })
 

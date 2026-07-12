@@ -85,6 +85,10 @@ interface ScanSlice {
   text: string
 }
 
+function getDocumentPath(document: TextDocument): string {
+  return document.uri.scheme === 'file' ? document.uri.fsPath : document.uri.path
+}
+
 function isDarkTheme(): boolean {
   return window.activeColorTheme.kind === ColorThemeKind.Dark
     || window.activeColorTheme.kind === ColorThemeKind.HighContrast
@@ -245,7 +249,7 @@ export function activate(context: ExtensionContext): void {
   let initialManagerError: unknown
   let manager = new DecorationManager(compiled.styles)
   for (const editor of window.visibleTextEditors) {
-    if (!shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length)
+    if (!shouldProcess(getDocumentPath(editor.document)) || !editor.visibleRanges.length)
       continue
     const selection = getRuleSelection(compiled, editor.document)
     try {
@@ -299,7 +303,7 @@ export function activate(context: ExtensionContext): void {
       scanSessions.delete(editor)
       manager.clear(editor)
     }
-    if (!shouldProcess(document.uri.path) || !editor.visibleRanges.length) {
+    if (!shouldProcess(getDocumentPath(document)) || !editor.visibleRanges.length) {
       if (isCurrent())
         clearEditor()
       return
@@ -457,7 +461,6 @@ export function activate(context: ExtensionContext): void {
           }
           else if (isRegexExecutionLimitError(error)) {
             session.failedRuleIds.add(rule.id)
-            failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {

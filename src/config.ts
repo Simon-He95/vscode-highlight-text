@@ -159,6 +159,9 @@ function compileStyleRules(
     rangeBehavior: DecorationRangeBehavior.ClosedClosed,
   }
   const option = isStyleObject(raw) ? raw as UserConfig & Record<string, unknown> : undefined
+  const rawPatterns = option ? option.match : raw
+  if (Array.isArray(rawPatterns) && rawPatterns.length > MAX_RULES_PER_MODE)
+    config.warnings.push(`Too many match patterns for ${context}: at most ${MAX_RULES_PER_MODE} patterns are allowed`)
   let patterns: PatternInput[]
   if (option) {
     patterns = normalizePatternsWithBudget(option.match, budget, MAX_RULES_PER_MODE)
@@ -172,11 +175,6 @@ function compileStyleRules(
     config.warnings.push(`Invalid match patterns for ${context}`)
     return []
   }
-  if (patterns.length > MAX_RULES_PER_MODE) {
-    config.warnings.push(`Too many match patterns for ${context}: at most ${MAX_RULES_PER_MODE} patterns are allowed`)
-    patterns = patterns.slice(0, MAX_RULES_PER_MODE)
-  }
-
   const commonStyle = normalizeStyle({ ...base, ...(option ?? {}) })
   const targets = compileTargets(option, base, commonStyle, context, config)
   if (!targets)
@@ -385,14 +383,22 @@ export function compileConfig(raw: unknown): CompiledConfig {
   return result
 }
 
+function normalizeFilterPath(value: string): string {
+  let normalized = value.replace(/\\/g, '/')
+  if (/^\/[a-z]:\//i.test(normalized))
+    normalized = normalized.slice(1)
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized
+}
+
 export function createExcludeFilter(value: unknown): (path: string) => boolean {
   const patterns = Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string').map((pattern) => {
         const negated = pattern.startsWith('!')
-        const body = negated ? pattern.slice(1) : pattern
-        const normalized = isAbsolute(body) || body.startsWith('**') ? body : `**/${body}`
-        const filter = createFilter(undefined, [normalized])
-        return { matches: (path: string) => !filter(path), negated }
+        const body = normalizeFilterPath(negated ? pattern.slice(1) : pattern)
+        const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
+        const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
+        const filter = createFilter(undefined, [normalized], { resolve: false })
+        return { matches: (path: string) => !filter(normalizeFilterPath(path)), negated }
       })
     : []
   return (path) => {

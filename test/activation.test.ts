@@ -388,6 +388,25 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('immediately retries a match-limit rule after the document changes', async () => {
+    configuration.rules = { plaintext: { light: { red: ['x'] } } }
+    const editor = createEditor('x'.repeat(1_001), 'limit-recovery')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Main pattern exceeded 1000 matches')))
+    editor.setText('x'.repeat(10))
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    await waitFor(() => {
+      const redTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+      expect(redTypes.some(type => editor.setDecorations.mock.calls.some(
+        ([appliedType, ranges]) => appliedType === type && ranges.length === 10,
+      ))).toBe(true)
+    })
+    disposeContext(context)
+  })
+
   it('does not resubmit failed rule ranges from an older document version', async () => {
     configuration.rules = {
       plaintext: {

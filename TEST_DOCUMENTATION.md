@@ -13,13 +13,13 @@ The Vitest suite imports production modules directly and covers:
 - Unicode-aware zero-width matching;
 - worker-enforced timeout, termination barriers, bounded infrastructure auto-retry, circuit breaking, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
 - sticky, explicit-empty, and document-relative `^`/`$` slice-boundary semantics;
-- engine-provided full-match/capture indices, legacy first-participating non-empty capture semantics, and artificial slice-boundary rejection;
+- engine-provided full-match/capture indices, legacy first-participating capture semantics including empty-group stopping, and artificial slice-boundary rejection;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
 - document-scoped rule cooldowns, document-versioned rule snapshots, resumable scan sessions with cumulative time/job/timeout/continuation limits, global language/rule/style/target/ignore/span limits, and atomic per-rule budgets;
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
-- initial activation fallback, transactional rule changes, cwd-independent ordered relative excludes and negated re-includes, lightweight exclude-only updates, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
+- initial activation fallback, transactional rule changes, cwd-independent ordered relative and Windows-absolute excludes and negated re-includes, lightweight exclude-only updates, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits, duplicate-range removal, and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-interval/cache state, masked-text cache size, cache generations, and reuse of unchanged slice text inside the worker;
 - one shared regex executor and language/theme decoration profiles with profile-local priority layers, editor-owned preflight reservations, manager/global transition type budgets, failed-profile quarantine, split-editor reuse, cleanup, and disposal.
