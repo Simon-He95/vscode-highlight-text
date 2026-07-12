@@ -9,7 +9,7 @@ pnpm check
 The Vitest suite imports production modules directly and covers:
 
 - input-attempt-budgeted configuration compilation, transactional style registration, malformed settings, capped warnings/toasts, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
-- lookarounds, named groups, advisory diagnostics for main/ignore patterns, and original/masked-text intersection plus interval `ignoreReg` filtering;
+- lookarounds, named groups, advisory diagnostics for main/ignore patterns, single-pass no-ignore execution, and masked candidates with sticky original-text validation;
 - Unicode-aware zero-width matching;
 - worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
 - sticky and explicit-empty flag semantics;
@@ -19,7 +19,7 @@ The Vitest suite imports production modules directly and covers:
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
-- initial activation fallback, transactional configuration changes, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
+- initial activation fallback, transactional rule changes, lightweight exclude-only updates, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits, duplicate-range removal, and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-interval/cache state, cache generations, and reuse of unchanged slice text inside the worker;
 - per-editor executors and deterministic, transactional decoration type creation, batching, reuse, cleanup, and disposal.

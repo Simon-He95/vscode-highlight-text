@@ -106,11 +106,13 @@ async function scanRule(
   signal: AbortSignal,
   maxMatches: number,
   maxSpans: number,
+  refreshSpanBudget: boolean,
 ): Promise<Array<{ end: number, start: number, styleId: string }>> {
   const matches = await executor.execute({
     ignores: rule.ignores,
     maxMatches,
     maxSpans,
+    refreshSpanBudget,
     pattern: rule.pattern,
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
@@ -275,7 +277,15 @@ export function activate(context: ExtensionContext): void {
         }
         const maxMatches = MAX_MATCHES_PER_RULE
         try {
-          const matches = await scanRule(executor, rule, slice, task.signal, maxMatches, MAX_TOTAL_RANGES)
+          const matches = await scanRule(
+            executor,
+            rule,
+            slice,
+            task.signal,
+            maxMatches,
+            budget.remainingRanges,
+            budget.remainingRanges < MAX_TOTAL_RANGES,
+          )
           if (!isCurrent())
             return
           for (const match of matches) {
@@ -299,15 +309,13 @@ export function activate(context: ExtensionContext): void {
             return
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
           if (isRegexExecutionBudgetError(error)) {
-            failedRuleIds.add(rule.id)
-            failures.recordFailure(document, rule.id)
-            warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
+            budgetExceeded = true
           }
           else {
             failedRuleIds.add(rule.id)
             if (isRegexExecutionTimeoutError(error)) {
               failures.recordFailure(document, rule.id)
-              warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; disabled for this document for ${REGEX_FAILURE_COOLDOWN / 1000}s`)
+              warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
             }
             else if (isRegexExecutionLimitError(error)) {
               failures.recordFailure(document, rule.id)
@@ -420,10 +428,18 @@ export function activate(context: ExtensionContext): void {
     window.onDidChangeTextEditorVisibleRanges(event => scheduler.schedule(event.textEditor)),
     window.onDidChangeVisibleTextEditors(() => refreshVisibleEditors()),
     workspace.onDidChangeConfiguration((event) => {
-      if (!event.affectsConfiguration('vscode-highlight-text'))
+      const rulesChanged = event.affectsConfiguration('vscode-highlight-text.rules')
+      const excludeChanged = event.affectsConfiguration('vscode-highlight-text.exclude')
+      if (!rulesChanged && !excludeChanged)
         return
+      if (!rulesChanged) {
+        shouldProcess = getExcludeFilter()
+        window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
+        refreshVisibleEditors(true)
+        return
+      }
       const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
-      const nextFilter = getExcludeFilter()
+      const nextFilter = excludeChanged ? getExcludeFilter() : shouldProcess
       let nextManager: DecorationManager
       try {
         nextManager = new DecorationManager(nextCompiled.styles)

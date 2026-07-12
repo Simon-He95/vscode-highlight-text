@@ -7,6 +7,7 @@ export interface WorkerRequest {
   ignores: CompiledPattern[]
   maxMatches: number
   maxSpans?: number
+  refreshSpanBudget?: boolean
   pattern: CompiledPattern
   targetGroups: Array<number | undefined>
   text: string
@@ -171,47 +172,45 @@ parentPort.on('message', ({ id, request }) => {
       return fullSpan.join(':') + '|' + spans.map(span => span ? span.join(':') : '-').join(',')
     }
 
-    const originalMatches = new Set()
-    const originalRegex = new RegExp(request.pattern.source, request.pattern.flags)
-    const originalCollected = collect(originalRegex, text, request.maxMatches, (match) => {
-      const fullSpan = match.indices && match.indices[0]
-      if (!fullSpan)
-        return
-      const spans = getSpans(match)
-      if (!overlapsIgnored(fullSpan) && !spans.some(span => span && overlapsIgnored(span)))
-        originalMatches.add(matchKey(fullSpan, spans))
-    })
-    if (originalCollected.truncated) {
-      const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
-      error.code = 'MATCH_LIMIT'
-      throw error
-    }
-
+    const hasIgnores = request.ignores.length > 0
     const regex = new RegExp(request.pattern.source, request.pattern.flags)
+    const stickyFlags = request.pattern.flags.replace(/g/g, '').replace(/y/g, '') + 'y'
+    const originalAtCandidate = hasIgnores ? new RegExp(request.pattern.source, stickyFlags) : undefined
     const maxSpans = request.maxSpans ?? 10000
     let spanCount = 0
     const results = []
-    if (originalMatches.size) collect(regex, maskedText, Number.MAX_SAFE_INTEGER, (match) => {
+    const collected = collect(regex, hasIgnores ? maskedText : text, request.maxMatches, (match) => {
       const fullSpan = match.indices && match.indices[0]
       if (!fullSpan)
         return
       const spans = getSpans(match)
-      const key = matchKey(fullSpan, spans)
-      if (!originalMatches.has(key))
+      if (overlapsIgnored(fullSpan) || spans.some(span => span && overlapsIgnored(span)))
         return
-      originalMatches.delete(key)
+      if (originalAtCandidate) {
+        originalAtCandidate.lastIndex = fullSpan[0]
+        const originalMatch = originalAtCandidate.exec(text)
+        if (!originalMatch)
+          return
+        const originalFullSpan = originalMatch.indices && originalMatch.indices[0]
+        if (!originalFullSpan || matchKey(originalFullSpan, getSpans(originalMatch)) !== matchKey(fullSpan, spans))
+          return
+      }
       const validSpanCount = spans.filter(Boolean).length
       if (spanCount + validSpanCount > maxSpans) {
         const error = new Error('Rule output exceeded the remaining ' + maxSpans + ' span budget')
-        error.code = 'SPAN_BUDGET'
+        error.code = request.refreshSpanBudget ? 'REFRESH_BUDGET' : 'SPAN_BUDGET'
         throw error
       }
       if (validSpanCount) {
         spanCount += validSpanCount
         results.push({ spans })
       }
-      return originalMatches.size > 0
     })
+    if (collected.truncated) {
+      const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
+      error.code = 'MATCH_LIMIT'
+      throw error
+    }
     parentPort.postMessage({ id, results })
   }
   catch (error) {
@@ -437,9 +436,9 @@ export class RegexExecutor {
       if (message.id !== id)
         return
       const error = message.error
-        ? message.errorCode === 'SPAN_BUDGET'
+        ? message.errorCode === 'REFRESH_BUDGET'
           ? new RegexExecutionBudgetError(message.error)
-          : message.errorCode === 'IGNORE_LIMIT' || message.errorCode === 'MATCH_LIMIT'
+          : message.errorCode === 'IGNORE_LIMIT' || message.errorCode === 'MATCH_LIMIT' || message.errorCode === 'SPAN_BUDGET'
             ? new RegexExecutionLimitError(message.error)
             : new Error(message.error)
         : undefined

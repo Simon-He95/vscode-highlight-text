@@ -404,9 +404,11 @@ describe('extension activation orchestration', () => {
     editor.setDecorations.mockClear()
     vi.mocked(window.createTextEditorDecorationType).mockClear()
     configuration.exclude = ['**/src/**']
-    await __events.configuration.fire({ affectsConfiguration: () => true })
+    await __events.configuration.fire({
+      affectsConfiguration: (section: string) => section === 'vscode-highlight-text.exclude',
+    })
     await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), []))
-    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
+    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
 
     window.visibleTextEditors = []
     await __events.visibleEditors.fire([])

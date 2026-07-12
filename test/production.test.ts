@@ -419,6 +419,18 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('uses ignore masking to isolate catastrophic main-pattern input', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'a+b', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(a+)+$|TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${'a'.repeat(30)}b TARGET`,
+    })).resolves.toEqual([{ spans: [[32, 38]] }])
+    executor.dispose()
+  })
+
   it('enforces the span budget inside the worker', async () => {
     const executor = new RegexExecutor(500)
     await expect(executor.execute({

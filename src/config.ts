@@ -184,6 +184,10 @@ function compileStyleRules(
       config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
       return []
     }
+    if (option.ignoreReg.length > budget.remainingInputs) {
+      config.warnings.push(`Configuration input budget was reached while compiling ignoreReg for ${context}`)
+      return []
+    }
     const ignorePatterns = normalizePatternsWithBudget(option.ignoreReg, budget, MAX_IGNORE_PATTERNS_PER_RULE)
     ignores = ignorePatterns.flatMap((input) => {
       try {
