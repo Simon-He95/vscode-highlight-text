@@ -3,8 +3,10 @@ import type { CompiledPattern, MatchResult } from './type'
 import { Worker } from 'node:worker_threads'
 
 export interface WorkerRequest {
+  acceptedMatchOffset?: number
   cacheGeneration?: number
   ignores: CompiledPattern[]
+  includeFullSpan?: boolean
   maxMatches: number
   maxSpans?: number
   refreshSpanBudget?: boolean
@@ -167,13 +169,14 @@ parentPort.on('message', ({ id, request }) => {
       return request.targetGroups.map((groupIndex) => {
         let index = groupIndex
         if (index === undefined) {
-          index = 0
+          if (match.length === 1)
+            return match.indices && match.indices[0]
           for (let candidate = 1; candidate < match.length; candidate++) {
-            if (match.indices && match.indices[candidate]) {
-              index = candidate
-              break
-            }
+            const candidateSpan = match.indices && match.indices[candidate]
+            if (candidateSpan && candidateSpan[0] !== candidateSpan[1])
+              return candidateSpan
           }
+          return undefined
         }
         const span = match.indices && match.indices[index]
         if (!span || span[0] < 0)
@@ -217,13 +220,13 @@ parentPort.on('message', ({ id, request }) => {
         throw error
       }
       if (validSpanCount) {
-        if (results.length >= request.maxMatches) {
+        if ((request.acceptedMatchOffset ?? 0) + results.length >= request.maxMatches) {
           const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
           error.code = 'MATCH_LIMIT'
           throw error
         }
         spanCount += validSpanCount
-        results.push({ spans })
+        results.push(request.includeFullSpan ? { fullSpan, spans } : { spans })
       }
     })
     if (collected.truncated) {
@@ -261,7 +264,7 @@ export class RegexExecutionBudgetError extends Error {
 }
 
 export class RegexExecutionInfrastructureError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly retryAfterMs = 5_000) {
     super(message)
     this.name = 'RegexExecutionInfrastructureError'
   }
@@ -329,7 +332,7 @@ export class RegexExecutor {
     if (this.disposed || signal?.aborted)
       return Promise.reject(new RegexExecutionAbortedError())
     if (Date.now() < this.infrastructureBlockedUntil)
-      return Promise.reject(new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable'))
+      return Promise.reject(new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable', this.infrastructureBlockedUntil - Date.now()))
 
     return new Promise((resolve, reject) => {
       const job: PendingJob = { request, resolve, reject, signal }
@@ -404,7 +407,7 @@ export class RegexExecutor {
       return
     }
     if (Date.now() < this.infrastructureBlockedUntil) {
-      const error = new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable')
+      const error = new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable', this.infrastructureBlockedUntil - Date.now())
       for (const job of this.pending.splice(0)) {
         this.removeAbortListener(job)
         job.reject(error)

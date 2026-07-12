@@ -11,9 +11,9 @@ The Vitest suite imports production modules directly and covers:
 - self-contained inline settings schema, input-attempt-budgeted configuration compilation, transactional style registration, malformed settings, capped warnings/toasts, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
 - lookarounds, named groups, fail-closed invalid ignore patterns, separate raw/accepted match budgets, advisory diagnostics, single-pass no-ignore execution, and masked candidates with sticky original-text validation;
 - Unicode-aware zero-width matching;
-- worker-enforced timeout, termination barriers, infrastructure circuit breaking, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
+- worker-enforced timeout, termination barriers, bounded infrastructure auto-retry, circuit breaking, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
 - sticky, explicit-empty, and document-relative `^`/`$` slice-boundary semantics;
-- engine-provided indices for repeated, optional, and lookbehind captures;
+- engine-provided full-match/capture indices, legacy first-participating non-empty capture semantics, and artificial slice-boundary rejection;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
 - document-scoped rule cooldowns, document-versioned rule snapshots, resumable scan sessions, global language/rule/style/target/ignore/span limits, and atomic per-rule refresh range/time budgets;
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;

@@ -51,7 +51,9 @@ interface ScanSession {
   acceptedRangeKeys: Set<string>
   candidateKeys: Set<string>
   candidateSnapshot: Map<string, VscodeRange[]>
+  currentRuleMatchCount: number
   failedRuleIds: Set<string>
+  infrastructureRetryCount: number
   key: string
   nextRuleIndex: number
   nextSliceIndex: number
@@ -66,6 +68,8 @@ interface ScanPlan {
 }
 
 interface ScanSlice {
+  artificialEnd: boolean
+  artificialStart: boolean
   coreEnd: number
   coreStart: number
   scanStart: number
@@ -101,6 +105,8 @@ function getScanSlices(editor: TextEditor): ScanPlan {
   const scanKey = merged.map(range => `${range.start}:${range.end}`).join(',')
   const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
   const plannedSlices = merged.map(({ start, end }) => ({
+    artificialStart: start > 0,
+    artificialEnd: end < documentEnd,
     coreStart: start,
     coreEnd: end,
     scanStart: Math.max(0, start - 1),
@@ -116,17 +122,20 @@ function getScanSlices(editor: TextEditor): ScanPlan {
   return { complete: true, scanKey, slices }
 }
 
-async function scanRule(
+export async function scanRule(
   executor: RegexExecutor,
   rule: CompiledRule,
   slice: ScanSlice,
   signal: AbortSignal,
   maxMatches: number,
+  acceptedMatchOffset: number,
   maxSpans: number,
   refreshSpanBudget: boolean,
 ): Promise<Array<{ end: number, start: number, styleId: string }>> {
   const matches = await executor.execute({
+    acceptedMatchOffset,
     ignores: rule.ignores,
+    includeFullSpan: true,
     maxMatches,
     maxSpans,
     refreshSpanBudget,
@@ -135,15 +144,24 @@ async function scanRule(
     text: slice.text,
   }, signal)
 
-  return matches.flatMap(match => match.spans.flatMap((span, index) => {
-    if (!span)
+  return matches.flatMap((match) => {
+    if (
+      !match.fullSpan
+      || (slice.artificialStart && match.fullSpan[0] === 0)
+      || (slice.artificialEnd && match.fullSpan[1] === slice.text.length)
+    ) {
       return []
-    const start = slice.scanStart + span[0]
-    const end = slice.scanStart + span[1]
-    return start >= slice.coreStart && end <= slice.coreEnd
-      ? [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
-      : []
-  }))
+    }
+    return match.spans.flatMap((span, index) => {
+      if (!span)
+        return []
+      const start = slice.scanStart + span[0]
+      const end = slice.scanStart + span[1]
+      return start >= slice.coreStart && end <= slice.coreEnd
+        ? [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
+        : []
+    })
+  })
 }
 
 const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
@@ -211,22 +229,18 @@ export function activate(context: ExtensionContext): void {
   let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
   let shouldProcess = getExcludeFilter()
   let initialManagerError: unknown
-  let manager: DecorationManager
-  const candidateManager = new DecorationManager(compiled.styles)
-  try {
-    for (const editor of window.visibleTextEditors) {
-      if (!shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length)
-        continue
-      const selection = getRuleSelection(compiled, editor.document)
-      candidateManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
+  let manager = new DecorationManager(compiled.styles)
+  for (const editor of window.visibleTextEditors) {
+    if (!shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length)
+      continue
+    const selection = getRuleSelection(compiled, editor.document)
+    try {
+      manager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
     }
-    manager = candidateManager
-  }
-  catch (error) {
-    candidateManager.dispose()
-    initialManagerError = error
-    compiled = { languages: new Map(), styles: new Map(), warnings: compiled.warnings }
-    manager = new DecorationManager(new Map())
+    catch (error) {
+      initialManagerError ??= error
+      manager.clear(editor)
+    }
   }
   let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
   let scanSessions = new WeakMap<TextEditor, ScanSession>()
@@ -248,7 +262,9 @@ export function activate(context: ExtensionContext): void {
   if (initialManagerError)
     warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`)
 
+  const retryTimers = new Map<TextEditor, ReturnType<typeof setTimeout>>()
   let scheduleContinuation = (_editor: TextEditor) => {}
+  let scheduleInfrastructureRetry = (_editor: TextEditor, _delay: number, _isCurrent: () => boolean) => {}
 
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
@@ -306,7 +322,9 @@ export function activate(context: ExtensionContext): void {
         acceptedRangeKeys: new Set(),
         candidateKeys: new Set(),
         candidateSnapshot: new Map(),
+        currentRuleMatchCount: 0,
         failedRuleIds: new Set(),
+        infrastructureRetryCount: 0,
         key: sessionKey,
         nextRuleIndex: 0,
         nextSliceIndex: 0,
@@ -320,6 +338,7 @@ export function activate(context: ExtensionContext): void {
       budget.consumeRange()
     const executor = getExecutor(editor)
     let infrastructureFailed = false
+    let infrastructureRetryAfterMs = 5_000
     let needsContinuation = false
 
     while (session.nextRuleIndex < rules.length) {
@@ -358,6 +377,7 @@ export function activate(context: ExtensionContext): void {
             slice,
             task.signal,
             MAX_MATCHES_PER_RULE,
+            session.currentRuleMatchCount,
             MAX_TOTAL_RANGES,
             false,
           )
@@ -376,6 +396,8 @@ export function activate(context: ExtensionContext): void {
             ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
             session.candidateSnapshot.set(match.styleId, ranges)
           }
+          session.currentRuleMatchCount += matches.length
+          session.infrastructureRetryCount = 0
           session.nextSliceIndex++
         }
         catch (error) {
@@ -385,6 +407,7 @@ export function activate(context: ExtensionContext): void {
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
           if (isRegexExecutionInfrastructureError(error)) {
             infrastructureFailed = true
+            infrastructureRetryAfterMs = error.retryAfterMs
             warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`)
           }
           else if (isRegexExecutionTimeoutError(error)) {
@@ -432,13 +455,18 @@ export function activate(context: ExtensionContext): void {
       }
       session.candidateKeys = new Set()
       session.candidateSnapshot = new Map()
+      session.currentRuleMatchCount = 0
       session.nextSliceIndex = 0
       session.nextRuleIndex++
     }
 
     if (infrastructureFailed) {
-      scanSessions.delete(editor)
       clearStaleSnapshot()
+      session.infrastructureRetryCount++
+      if (session.infrastructureRetryCount <= 3)
+        scheduleInfrastructureRetry(editor, infrastructureRetryAfterMs, isCurrent)
+      else
+        scanSessions.delete(editor)
       return
     }
     if (needsContinuation) {
@@ -482,12 +510,27 @@ export function activate(context: ExtensionContext): void {
     error => warnOnce(error instanceof Error ? error.message : String(error)),
   )
   scheduleContinuation = editor => scheduler.schedule(editor, true)
+  scheduleInfrastructureRetry = (editor, delay, isCurrent) => {
+    const previous = retryTimers.get(editor)
+    if (previous)
+      clearTimeout(previous)
+    const timer = setTimeout(() => {
+      retryTimers.delete(editor)
+      if (isCurrent())
+        scheduler.schedule(editor, true)
+    }, Math.max(0, delay))
+    retryTimers.set(editor, timer)
+  }
 
   const refreshVisibleEditors = (immediate = true) => {
     const visible = new Set(window.visibleTextEditors)
     for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
         scheduler.remove(editor)
+        const retryTimer = retryTimers.get(editor)
+        if (retryTimer)
+          clearTimeout(retryTimer)
+        retryTimers.delete(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
         manager.clear(editor)
@@ -591,6 +634,8 @@ export function activate(context: ExtensionContext): void {
       dispose: () => {
         disposed = true
         scheduler.dispose()
+        retryTimers.forEach(timer => clearTimeout(timer))
+        retryTimers.clear()
         executor.dispose()
         manager.dispose()
       },

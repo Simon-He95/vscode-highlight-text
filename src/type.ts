@@ -39,5 +39,6 @@ export interface CompiledConfig {
 }
 
 export interface MatchResult {
+  fullSpan?: [number, number]
   spans: Array<[number, number] | undefined>
 }

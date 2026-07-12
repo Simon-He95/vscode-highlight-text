@@ -6,10 +6,17 @@ import { window } from 'vscode'
 import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
+import { scanRule } from '../src/index'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, RegexExecutor } from '../src/regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
 import { LatestTaskScheduler } from '../src/scheduler'
+
+vi.mock('@vscode-use/utils', () => ({
+  createSelect: vi.fn(),
+  getConfiguration: vi.fn((_name: string, defaultValue: unknown) => defaultValue),
+  setConfiguration: vi.fn(),
+}))
 
 class MockEditor {
   public setDecorations = vi.fn()
@@ -345,6 +352,40 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('preserves legacy default capture behavior for absent and empty groups', async () => {
+    const executor = new RegexExecutor(500)
+    for (const source of ['(foo)?bar', '()bar']) {
+      await expect(executor.execute({
+        ignores: [],
+        maxMatches: 10,
+        pattern: { source, flags: 'gd' },
+        targetGroups: [undefined],
+        text: 'bar',
+      })).resolves.toEqual([])
+    }
+    executor.dispose()
+  })
+
+  it('rejects a target whose full match touches an artificial slice boundary', async () => {
+    const executor = new RegexExecutor(500)
+    const rule = {
+      context: 'test',
+      id: 'test',
+      ignores: [],
+      pattern: { source: '^[\\s\\S]*?(foo)', flags: 'gd' },
+      targets: [{ groupIndex: 1, styleId: 'red' }],
+    }
+    await expect(scanRule(executor, rule, {
+      artificialEnd: true,
+      artificialStart: true,
+      coreEnd: 4,
+      coreStart: 1,
+      scanStart: 0,
+      text: '\nfooX',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toEqual([])
+    executor.dispose()
+  })
+
   it('uses engine-provided indices for captures and local ignores', async () => {
     const executor = new RegexExecutor(500)
     await expect(executor.execute({
@@ -509,6 +550,19 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: `${ignored}TARGET`,
     })).resolves.toEqual([{ spans: [[ignored.length, ignored.length + 6]] }])
+    executor.dispose()
+  })
+
+  it('enforces the accepted match limit across slices', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      acceptedMatchOffset: 9,
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'x', flags: 'gd' },
+      targetGroups: [0],
+      text: 'xx',
+    })).rejects.toThrow('Main pattern exceeded 10 matches')
     executor.dispose()
   })
 
@@ -949,6 +1003,21 @@ describe('decoration lifecycle', () => {
     expect(type.dispose).not.toHaveBeenCalled()
     manager.clear(second)
     expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('recovers a capacity-limited profile after the previous profile is released', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const first = new MockEditor() as any
+    const second = new MockEditor() as any
+    const layersA = Array.from({ length: 1_000 }, (_, index) => ({ id: `a-${index}`, styleId: 'a' }))
+    const layersB = Array.from({ length: 1_000 }, (_, index) => ({ id: `b-${index}`, styleId: 'a' }))
+    manager.reserveProfile(first, 'a', layersA)
+    manager.reserveProfile(second, 'a', layersA)
+    expect(() => manager.reserveProfile(first, 'b', layersB)).toThrow('Decoration type budget exceeded')
+    manager.clear(second)
+    expect(() => manager.reserveProfile(first, 'b', layersB)).not.toThrow()
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2_000)
     manager.dispose()
   })
 

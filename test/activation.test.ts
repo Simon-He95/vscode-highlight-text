@@ -128,7 +128,7 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('disposes completed profiles when a later initial profile fails', () => {
+  it('keeps successful initial profiles when a later profile fails', async () => {
     configuration.rules = {
       languageA: { light: { red: ['foo'] } },
       languageB: { light: { blue: ['foo'] } },
@@ -145,9 +145,11 @@ describe('extension activation orchestration', () => {
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     expect(() => activate(context)).not.toThrow()
-    expect(completedType.dispose).toHaveBeenCalledTimes(1)
+    expect(completedType.dispose).not.toHaveBeenCalled()
     expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Failed to apply initial configuration'))
+    await waitFor(() => expect(first.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
     disposeContext(context)
+    expect(completedType.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('creates exact-language decoration profiles before generic aliases', async () => {

@@ -36,9 +36,7 @@ export class DecorationManager {
       this.typeCount + layers.length > MAX_MANAGER_DECORATION_TYPES
       || globallyAllocatedDecorationTypes + layers.length > MAX_TRANSITION_DECORATION_TYPES
     ) {
-      const error = new Error(`Decoration type budget exceeded: at most ${MAX_MANAGER_DECORATION_TYPES} active types are allowed`)
-      this.failedProfiles.set(profileId, error)
-      throw error
+      throw new Error(`Decoration type budget exceeded: at most ${MAX_MANAGER_DECORATION_TYPES} active types are allowed`)
     }
     const types = new Map<string, TextEditorDecorationType>()
     try {
@@ -60,6 +58,9 @@ export class DecorationManager {
     if (this.disposed)
       return
     const previousProfileId = this.editorProfiles.get(editor)
+    const previousProfile = previousProfileId ? this.profiles.get(previousProfileId) : undefined
+    if (previousProfileId !== profileId && previousProfile?.editors.size === 1)
+      this.detachEditor(editor, previousProfileId!)
     try {
       this.prepareProfile(profileId, priorityStyleIds)
     }
