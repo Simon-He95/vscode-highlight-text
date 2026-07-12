@@ -15,7 +15,11 @@ const MAX_SCAN_SIZE = 200_000
 const MAX_MATCHES_PER_RULE = 1_000
 const MAX_TOTAL_RANGES = 10_000
 const MAX_TOTAL_SCAN_TIME = 1_000
-const MAX_PROFILE_LAYERS = 1_000
+const MAX_SESSION_SCAN_TIME = 5_000
+const MAX_SESSION_JOBS = 50
+const MAX_SESSION_TIMEOUTS = 3
+const MAX_SESSION_CONTINUATIONS = 10
+const MAX_PROFILE_LAYERS = 300
 const REGEX_FAILURE_COOLDOWN = 30_000
 const MAX_REMEMBERED_WARNINGS = 100
 const OVERSCAN_LINES = 20
@@ -53,7 +57,11 @@ interface ScanSession {
   candidateSnapshot: Map<string, VscodeRange[]>
   currentRuleMatchCount: number
   failedRuleIds: Set<string>
+  continuationCount: number
+  elapsedScanTime: number
   infrastructureRetryCount: number
+  timeoutCount: number
+  workerJobCount: number
   key: string
   nextRuleIndex: number
   nextSliceIndex: number
@@ -323,8 +331,12 @@ export function activate(context: ExtensionContext): void {
         candidateKeys: new Set(),
         candidateSnapshot: new Map(),
         currentRuleMatchCount: 0,
+        continuationCount: 0,
+        elapsedScanTime: 0,
         failedRuleIds: new Set(),
         infrastructureRetryCount: 0,
+        timeoutCount: 0,
+        workerJobCount: 0,
         key: sessionKey,
         nextRuleIndex: 0,
         nextSliceIndex: 0,
@@ -340,6 +352,7 @@ export function activate(context: ExtensionContext): void {
     let infrastructureFailed = false
     let infrastructureRetryAfterMs = 5_000
     let needsContinuation = false
+    let sessionLimitReached = false
 
     while (session.nextRuleIndex < rules.length) {
       if (!isCurrent())
@@ -370,6 +383,16 @@ export function activate(context: ExtensionContext): void {
           break
         }
         const slice = scanPlan.slices[session.nextSliceIndex]
+        if (
+          session.elapsedScanTime >= MAX_SESSION_SCAN_TIME
+          || session.workerJobCount >= MAX_SESSION_JOBS
+          || session.timeoutCount >= MAX_SESSION_TIMEOUTS
+        ) {
+          sessionLimitReached = true
+          break
+        }
+        const jobStartedAt = Date.now()
+        session.workerJobCount++
         try {
           const matches = await scanRule(
             executor,
@@ -381,6 +404,7 @@ export function activate(context: ExtensionContext): void {
             MAX_TOTAL_RANGES,
             false,
           )
+          session.elapsedScanTime += Date.now() - jobStartedAt
           if (!isCurrent())
             return
           for (const match of matches) {
@@ -401,6 +425,7 @@ export function activate(context: ExtensionContext): void {
           session.nextSliceIndex++
         }
         catch (error) {
+          session.elapsedScanTime += Date.now() - jobStartedAt
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
           ruleFailed = true
@@ -411,6 +436,7 @@ export function activate(context: ExtensionContext): void {
             warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`)
           }
           else if (isRegexExecutionTimeoutError(error)) {
+            session.timeoutCount++
             session.failedRuleIds.add(rule.id)
             failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
@@ -429,7 +455,7 @@ export function activate(context: ExtensionContext): void {
         if (candidateExceeded)
           break
       }
-      if (needsContinuation || infrastructureFailed)
+      if (sessionLimitReached || needsContinuation || infrastructureFailed)
         break
       if (!ruleFailed && !candidateExceeded && session.nextSliceIndex < scanPlan.slices.length)
         continue
@@ -460,6 +486,16 @@ export function activate(context: ExtensionContext): void {
       session.nextRuleIndex++
     }
 
+    if (sessionLimitReached) {
+      for (let index = session.nextRuleIndex; index < rules.length; index++)
+        session.failedRuleIds.add(rules[index].id)
+      session.nextRuleIndex = rules.length
+      session.nextSliceIndex = 0
+      session.candidateKeys = new Set()
+      session.candidateSnapshot = new Map()
+      warnOnce(`Highlight scan session limit reached in ${document.uri.fsPath}; remaining rules were skipped`)
+    }
+
     if (infrastructureFailed) {
       clearStaleSnapshot()
       session.infrastructureRetryCount++
@@ -470,12 +506,21 @@ export function activate(context: ExtensionContext): void {
       return
     }
     if (needsContinuation) {
-      clearStaleSnapshot()
-      queueMicrotask(() => {
-        if (isCurrent())
-          scheduleContinuation(editor)
-      })
-      return
+      session.continuationCount++
+      if (session.continuationCount > MAX_SESSION_CONTINUATIONS) {
+        for (let index = session.nextRuleIndex; index < rules.length; index++)
+          session.failedRuleIds.add(rules[index].id)
+        session.nextRuleIndex = rules.length
+        warnOnce(`Highlight continuation limit reached in ${document.uri.fsPath}; remaining rules were skipped`)
+      }
+      else {
+        clearStaleSnapshot()
+        queueMicrotask(() => {
+          if (isCurrent())
+            scheduleContinuation(editor)
+        })
+        return
+      }
     }
     scanSessions.delete(editor)
     const { failedRuleIds, scannedSnapshots } = session

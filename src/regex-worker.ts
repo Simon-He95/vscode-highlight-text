@@ -147,7 +147,7 @@ parentPort.on('message', ({ id, request }) => {
     const mergedIgnored = ignoreEntry.intervals
     const maskedText = ignoreEntry.maskedText
 
-    function overlapsIgnored(span) {
+    function findOverlappingIgnored(span) {
       let low = 0
       let high = mergedIgnored.length
       while (low < high) {
@@ -159,10 +159,15 @@ parentPort.on('message', ({ id, request }) => {
       }
       const ignored = mergedIgnored[low]
       if (!ignored)
-        return false
-      if (span[0] === span[1])
-        return ignored[0] <= span[0] && span[0] < ignored[1]
-      return span[0] < ignored[1] && ignored[0] < span[1]
+        return undefined
+      const overlaps = span[0] === span[1]
+        ? ignored[0] <= span[0] && span[0] < ignored[1]
+        : span[0] < ignored[1] && ignored[0] < span[1]
+      return overlaps ? ignored : undefined
+    }
+
+    function overlapsIgnored(span) {
+      return findOverlappingIgnored(span) !== undefined
     }
 
     function getSpans(match) {
@@ -202,7 +207,15 @@ parentPort.on('message', ({ id, request }) => {
       if (!fullSpan)
         return
       const spans = getSpans(match)
-      if (overlapsIgnored(fullSpan) || spans.some(span => span && overlapsIgnored(span)))
+      const overlapping = findOverlappingIgnored(fullSpan)
+      if (overlapping) {
+        regex.lastIndex = Math.max(
+          overlapping[1],
+          advanceStringIndex(text, match.index, regex.unicode || regex.unicodeSets),
+        )
+        return
+      }
+      if (spans.some(span => span && overlapsIgnored(span)))
         return
       if (originalAtCandidate) {
         originalAtCandidate.lastIndex = fullSpan[0]

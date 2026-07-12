@@ -267,6 +267,12 @@ describe('regex configuration', () => {
     ]))
   })
 
+  it('matches relative exclude globs independently of the process cwd', () => {
+    const filter = createExcludeFilter(['dist/**'])
+    expect(filter('/workspace/project/dist/index.js')).toBe(false)
+    expect(filter('/workspace/project/src/index.js')).toBe(true)
+  })
+
   it('normalizes styles, empty excludes, and rule-local ignores', () => {
     const source = { background: 'red', textDecoration: 'underline' }
     expect(normalizeStyle(source)).toEqual({ backgroundColor: 'red', textDecoration: 'underline' })
@@ -537,6 +543,18 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: `${'a'.repeat(30)}b TARGET`,
     })).resolves.toEqual([{ spans: [[32, 38]] }])
+    executor.dispose()
+  })
+
+  it('restarts after an ignored masked prefix to find a later legal match', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'x', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '\\s*(b)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'x b',
+    })).resolves.toEqual([{ spans: [[2, 3]] }])
     executor.dispose()
   })
 

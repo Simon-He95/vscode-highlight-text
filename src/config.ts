@@ -1,5 +1,6 @@
 import type { DecorationRenderOptions } from 'vscode'
 import type { CompiledConfig, CompiledRule, CompiledTarget, PatternInput, UserConfig } from './type'
+import { isAbsolute } from 'node:path'
 import { createFilter } from '@rollup/pluginutils'
 import { DecorationRangeBehavior } from 'vscode'
 import { compilePattern, isPatternTuple, isRegexSafe, normalizePatterns } from './regex'
@@ -385,7 +386,14 @@ export function compileConfig(raw: unknown): CompiledConfig {
 }
 
 export function createExcludeFilter(value: unknown): (path: string) => boolean {
-  const excludes = Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+  const excludes = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string').map((pattern) => {
+        const negated = pattern.startsWith('!')
+        const body = negated ? pattern.slice(1) : pattern
+        const normalized = isAbsolute(body) || body.startsWith('**') ? body : `**/${body}`
+        return negated ? `!${normalized}` : normalized
+      })
+    : []
   return createFilter(undefined, excludes)
 }
 

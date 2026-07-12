@@ -251,8 +251,21 @@ describe('extension activation orchestration', () => {
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     activate(context)
-    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(990)
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(297)
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('profile limit was reached')))
+    disposeContext(context)
+  })
+
+  it('stops a scan session after its cumulative worker job limit', async () => {
+    configuration.rules = {
+      plaintext: { light: { red: Array.from({ length: 51 }, (_, index) => `missing-${index}`) } },
+    }
+    const editor = createEditor('text', 'session-job-limit')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('scan session limit reached')))
     disposeContext(context)
   })
 
