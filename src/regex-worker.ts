@@ -190,10 +190,6 @@ parentPort.on('message', ({ id, request }) => {
       })
     }
 
-    function matchKey(fullSpan, spans) {
-      return fullSpan.join(':') + '|' + spans.map(span => span ? span.join(':') : '-').join(',')
-    }
-
     const hasIgnores = request.ignores.length > 0
     const regex = new RegExp(request.pattern.source, request.pattern.flags)
     const stickyFlags = request.pattern.flags.replace(/g/g, '').replace(/y/g, '') + 'y'
@@ -206,27 +202,38 @@ parentPort.on('message', ({ id, request }) => {
       const fullSpan = match.indices && match.indices[0]
       if (!fullSpan)
         return
-      const spans = getSpans(match)
+      let acceptedFullSpan = fullSpan
+      let acceptedSpans = getSpans(match)
       const overlapping = findOverlappingIgnored(fullSpan)
-      if (overlapping) {
-        regex.lastIndex = Math.max(
-          overlapping[1],
-          advanceStringIndex(text, match.index, regex.unicode || regex.unicodeSets),
-        )
-        return
-      }
-      if (spans.some(span => span && overlapsIgnored(span)))
-        return
       if (originalAtCandidate) {
         originalAtCandidate.lastIndex = fullSpan[0]
         const originalMatch = originalAtCandidate.exec(text)
-        if (!originalMatch)
+        const originalFullSpan = originalMatch && originalMatch.indices && originalMatch.indices[0]
+        const originalSpans = originalMatch ? getSpans(originalMatch) : []
+        if (
+          originalFullSpan
+          && !overlapsIgnored(originalFullSpan)
+          && !originalSpans.some(span => span && overlapsIgnored(span))
+        ) {
+          acceptedFullSpan = originalFullSpan
+          acceptedSpans = originalSpans
+          regex.lastIndex = originalFullSpan[1]
+        }
+        else if (overlapping) {
+          regex.lastIndex = Math.max(
+            overlapping[1],
+            advanceStringIndex(text, match.index, regex.unicode || regex.unicodeSets),
+          )
           return
-        const originalFullSpan = originalMatch.indices && originalMatch.indices[0]
-        if (!originalFullSpan || matchKey(originalFullSpan, getSpans(originalMatch)) !== matchKey(fullSpan, spans))
+        }
+        else {
           return
+        }
       }
-      const validSpanCount = spans.filter(Boolean).length
+      else if (overlapping || acceptedSpans.some(span => span && overlapsIgnored(span))) {
+        return
+      }
+      const validSpanCount = acceptedSpans.filter(Boolean).length
       if (spanCount + validSpanCount > maxSpans) {
         const error = new Error('Rule output exceeded the remaining ' + maxSpans + ' span budget')
         error.code = request.refreshSpanBudget ? 'REFRESH_BUDGET' : 'SPAN_BUDGET'
@@ -239,7 +246,7 @@ parentPort.on('message', ({ id, request }) => {
           throw error
         }
         spanCount += validSpanCount
-        results.push(request.includeFullSpan ? { fullSpan, spans } : { spans })
+        results.push(request.includeFullSpan ? { fullSpan: acceptedFullSpan, spans: acceptedSpans } : { spans: acceptedSpans })
       }
     })
     if (collected.truncated) {

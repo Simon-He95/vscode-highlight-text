@@ -386,15 +386,23 @@ export function compileConfig(raw: unknown): CompiledConfig {
 }
 
 export function createExcludeFilter(value: unknown): (path: string) => boolean {
-  const excludes = Array.isArray(value)
+  const patterns = Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string').map((pattern) => {
         const negated = pattern.startsWith('!')
         const body = negated ? pattern.slice(1) : pattern
         const normalized = isAbsolute(body) || body.startsWith('**') ? body : `**/${body}`
-        return negated ? `!${normalized}` : normalized
+        const filter = createFilter(undefined, [normalized])
+        return { matches: (path: string) => !filter(path), negated }
       })
     : []
-  return createFilter(undefined, excludes)
+  return (path) => {
+    let included = true
+    for (const pattern of patterns) {
+      if (pattern.matches(path))
+        included = pattern.negated
+    }
+    return included
+  }
 }
 
 export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean, warnings?: string[]): CompiledRule[] {

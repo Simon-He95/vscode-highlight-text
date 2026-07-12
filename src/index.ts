@@ -16,9 +16,10 @@ const MAX_MATCHES_PER_RULE = 1_000
 const MAX_TOTAL_RANGES = 10_000
 const MAX_TOTAL_SCAN_TIME = 1_000
 const MAX_SESSION_SCAN_TIME = 5_000
-const MAX_SESSION_JOBS = 50
+const MAX_JOBS_PER_CHUNK = 25
+const MAX_SESSION_JOBS = 1_000
 const MAX_SESSION_TIMEOUTS = 3
-const MAX_SESSION_CONTINUATIONS = 10
+const MAX_SESSION_CONTINUATIONS = 40
 const MAX_PROFILE_LAYERS = 300
 const REGEX_FAILURE_COOLDOWN = 30_000
 const MAX_REMEMBERED_WARNINGS = 100
@@ -139,7 +140,7 @@ export async function scanRule(
   acceptedMatchOffset: number,
   maxSpans: number,
   refreshSpanBudget: boolean,
-): Promise<Array<{ end: number, start: number, styleId: string }>> {
+): Promise<{ acceptedMatchCount: number, ranges: Array<{ end: number, start: number, styleId: string }> }> {
   const matches = await executor.execute({
     acceptedMatchOffset,
     ignores: rule.ignores,
@@ -152,7 +153,8 @@ export async function scanRule(
     text: slice.text,
   }, signal)
 
-  return matches.flatMap((match) => {
+  let acceptedMatchCount = 0
+  const ranges = matches.flatMap((match) => {
     if (
       !match.fullSpan
       || (slice.artificialStart && match.fullSpan[0] === 0)
@@ -160,7 +162,7 @@ export async function scanRule(
     ) {
       return []
     }
-    return match.spans.flatMap((span, index) => {
+    const matchRanges = match.spans.flatMap((span, index) => {
       if (!span)
         return []
       const start = slice.scanStart + span[0]
@@ -169,7 +171,11 @@ export async function scanRule(
         ? [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
         : []
     })
+    if (matchRanges.length)
+      acceptedMatchCount++
+    return matchRanges
   })
+  return { acceptedMatchCount, ranges }
 }
 
 const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
@@ -353,6 +359,7 @@ export function activate(context: ExtensionContext): void {
     let infrastructureRetryAfterMs = 5_000
     let needsContinuation = false
     let sessionLimitReached = false
+    let chunkJobCount = 0
 
     while (session.nextRuleIndex < rules.length) {
       if (!isCurrent())
@@ -391,10 +398,13 @@ export function activate(context: ExtensionContext): void {
           sessionLimitReached = true
           break
         }
+        if (chunkJobCount >= MAX_JOBS_PER_CHUNK) {
+          needsContinuation = true
+          break
+        }
         const jobStartedAt = Date.now()
-        session.workerJobCount++
         try {
-          const matches = await scanRule(
+          const scanResult = await scanRule(
             executor,
             rule,
             slice,
@@ -404,10 +414,12 @@ export function activate(context: ExtensionContext): void {
             MAX_TOTAL_RANGES,
             false,
           )
-          session.elapsedScanTime += Date.now() - jobStartedAt
           if (!isCurrent())
             return
-          for (const match of matches) {
+          session.elapsedScanTime += Date.now() - jobStartedAt
+          session.workerJobCount++
+          chunkJobCount++
+          for (const match of scanResult.ranges) {
             const rangeKey = `${match.styleId}:${match.start}-${match.end}`
             if (session.candidateKeys.has(rangeKey))
               continue
@@ -420,14 +432,16 @@ export function activate(context: ExtensionContext): void {
             ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
             session.candidateSnapshot.set(match.styleId, ranges)
           }
-          session.currentRuleMatchCount += matches.length
+          session.currentRuleMatchCount += scanResult.acceptedMatchCount
           session.infrastructureRetryCount = 0
           session.nextSliceIndex++
         }
         catch (error) {
-          session.elapsedScanTime += Date.now() - jobStartedAt
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
+          session.elapsedScanTime += Date.now() - jobStartedAt
+          session.workerJobCount++
+          chunkJobCount++
           ruleFailed = true
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
           if (isRegexExecutionInfrastructureError(error)) {

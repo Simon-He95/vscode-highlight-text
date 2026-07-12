@@ -267,9 +267,10 @@ describe('regex configuration', () => {
     ]))
   })
 
-  it('matches relative exclude globs independently of the process cwd', () => {
-    const filter = createExcludeFilter(['dist/**'])
+  it('matches relative excludes and ordered negated re-includes independently of cwd', () => {
+    const filter = createExcludeFilter(['dist/**', '!dist/keep/**'])
     expect(filter('/workspace/project/dist/index.js')).toBe(false)
+    expect(filter('/workspace/project/dist/keep/index.js')).toBe(true)
     expect(filter('/workspace/project/src/index.js')).toBe(true)
   })
 
@@ -388,7 +389,30 @@ describe('regex execution', () => {
       coreStart: 1,
       scanStart: 0,
       text: '\nfooX',
-    }, new AbortController().signal, 10, 0, 10, false)).resolves.toEqual([])
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toEqual({ acceptedMatchCount: 0, ranges: [] })
+    executor.dispose()
+  })
+
+  it('counts regex matches separately from generated capture ranges', async () => {
+    const executor = new RegexExecutor(500)
+    const rule = {
+      context: 'test',
+      id: 'test',
+      ignores: [],
+      pattern: { source: '(a)(b)', flags: 'gd' },
+      targets: [{ groupIndex: 1, styleId: 'red' }, { groupIndex: 2, styleId: 'blue' }],
+    }
+    await expect(scanRule(executor, rule, {
+      artificialEnd: false,
+      artificialStart: false,
+      coreEnd: 2,
+      coreStart: 0,
+      scanStart: 0,
+      text: 'ab',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({
+      acceptedMatchCount: 1,
+      ranges: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
+    })
     executor.dispose()
   })
 
@@ -555,6 +579,18 @@ describe('regex execution', () => {
       targetGroups: [1],
       text: 'x b',
     })).resolves.toEqual([{ spans: [[2, 3]] }])
+    executor.dispose()
+  })
+
+  it('uses the original sticky match when masking changes a greedy candidate', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'X', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'a.*(?= )', flags: 'gd' },
+      targetGroups: [0],
+      text: 'a aa X',
+    })).resolves.toEqual([{ spans: [[0, 4]] }])
     executor.dispose()
   })
 

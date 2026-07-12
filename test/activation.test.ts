@@ -256,16 +256,22 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('stops a scan session after its cumulative worker job limit', async () => {
+  it('continues after the per-chunk worker job limit', async () => {
     configuration.rules = {
-      plaintext: { light: { red: Array.from({ length: 51 }, (_, index) => `missing-${index}`) } },
+      plaintext: { light: { red: [...Array.from({ length: 50 }, (_, index) => `missing-${index}`), 'TARGET'] } },
     }
-    const editor = createEditor('text', 'session-job-limit')
+    const editor = createEditor('TARGET', 'chunk-job-limit')
     window.visibleTextEditors = [editor] as any
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     activate(context)
-    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('scan session limit reached')))
+    await waitFor(() => {
+      const redTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+      expect(redTypes.some(type => editor.setDecorations.mock.calls.some(
+        ([appliedType, ranges]) => appliedType === type && ranges.length > 0,
+      ))).toBe(true)
+    })
+    expect(window.showWarningMessage).not.toHaveBeenCalledWith(expect.stringContaining('scan session limit reached'))
     disposeContext(context)
   })
 
