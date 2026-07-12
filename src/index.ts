@@ -6,7 +6,7 @@ import { deepMerge } from 'lazy-js-utils'
 import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
-import { isRegexExecutionAbortedError, isRegexExecutionBudgetError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
+import { isRegexExecutionAbortedError, isRegexExecutionInfrastructureError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
@@ -274,83 +274,117 @@ export function activate(context: ExtensionContext): void {
     }
 
     const scannedSnapshots = new Map<string, Map<string, VscodeRange[]>>()
-    const scannedRangeKeys = new Set<string>()
+    const acceptedRangeKeys = new Set<string>()
     const failedRuleIds = new Set<string>()
     const executor = getExecutor(editor)
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
     let budgetExceeded = false
-    for (const slice of scanPlan.slices) {
+    let infrastructureFailed = false
+    for (const rule of rules) {
       if (!isCurrent())
         return
-      for (const rule of rules) {
+      if (budget.timeExceeded) {
+        budgetExceeded = true
+        break
+      }
+      if (failures.isDisabled(document, rule.id)) {
+        failedRuleIds.add(rule.id)
+        continue
+      }
+
+      const candidateSnapshot = new Map<string, VscodeRange[]>()
+      const candidateKeys = new Set<string>()
+      let candidateExceeded = false
+      let ruleFailed = false
+      for (const slice of scanPlan.slices) {
         if (!isCurrent())
           return
-        if (budget.exhausted) {
+        if (budget.timeExceeded) {
           budgetExceeded = true
+          ruleFailed = true
           break
         }
-        if (failures.isDisabled(document, rule.id)) {
-          failedRuleIds.add(rule.id)
-          continue
-        }
-        const maxMatches = MAX_MATCHES_PER_RULE
         try {
           const matches = await scanRule(
             executor,
             rule,
             slice,
             task.signal,
-            maxMatches,
-            budget.remainingRanges,
-            budget.remainingRanges < MAX_TOTAL_RANGES,
+            MAX_MATCHES_PER_RULE,
+            MAX_TOTAL_RANGES,
+            false,
           )
           if (!isCurrent())
             return
           for (const match of matches) {
             const rangeKey = `${match.styleId}:${match.start}-${match.end}`
-            if (scannedRangeKeys.has(rangeKey))
+            if (candidateKeys.has(rangeKey))
               continue
-            if (!budget.consumeRange()) {
-              budgetExceeded = true
+            if (candidateKeys.size >= MAX_TOTAL_RANGES) {
+              candidateExceeded = true
               break
             }
-            scannedRangeKeys.add(rangeKey)
-            const ruleSnapshot = scannedSnapshots.get(rule.id) ?? new Map<string, VscodeRange[]>()
-            const ranges = ruleSnapshot.get(match.styleId) ?? []
+            candidateKeys.add(rangeKey)
+            const ranges = candidateSnapshot.get(match.styleId) ?? []
             ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
-            ruleSnapshot.set(match.styleId, ranges)
-            scannedSnapshots.set(rule.id, ruleSnapshot)
+            candidateSnapshot.set(match.styleId, ranges)
           }
         }
         catch (error) {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
+          ruleFailed = true
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
-          if (isRegexExecutionBudgetError(error)) {
-            budgetExceeded = true
+          if (isRegexExecutionInfrastructureError(error)) {
+            infrastructureFailed = true
+            warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`)
+          }
+          else if (isRegexExecutionTimeoutError(error)) {
+            failedRuleIds.add(rule.id)
+            failures.recordFailure(document, rule.id)
+            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
+          }
+          else if (isRegexExecutionLimitError(error)) {
+            failedRuleIds.add(rule.id)
+            failures.recordFailure(document, rule.id)
+            warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {
             failedRuleIds.add(rule.id)
-            if (isRegexExecutionTimeoutError(error)) {
-              failures.recordFailure(document, rule.id)
-              warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
-            }
-            else if (isRegexExecutionLimitError(error)) {
-              failures.recordFailure(document, rule.id)
-              warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
-            }
-            else {
-              warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
-            }
+            warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
           }
+          break
         }
-        if (budgetExceeded)
+        if (candidateExceeded)
           break
       }
-      if (budgetExceeded)
+      if (infrastructureFailed || budgetExceeded)
         break
+      if (ruleFailed)
+        continue
+      if (candidateExceeded) {
+        scannedSnapshots.set(rule.id, new Map())
+        warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: it exceeds ${MAX_TOTAL_RANGES} unique ranges`)
+        continue
+      }
+
+      const newKeys = [...candidateKeys].filter(key => !acceptedRangeKeys.has(key))
+      if (newKeys.length > budget.remainingRanges) {
+        scannedSnapshots.set(rule.id, new Map())
+        warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: ${newKeys.length} ranges exceed the remaining refresh budget`)
+        continue
+      }
+      for (const key of newKeys) {
+        budget.consumeRange()
+        acceptedRangeKeys.add(key)
+      }
+      scannedSnapshots.set(rule.id, candidateSnapshot)
     }
 
+    if (infrastructureFailed) {
+      clearStaleSnapshot()
+      return
+    }
     if (budget.timeExceeded)
       budgetExceeded = true
     if (budgetExceeded) {

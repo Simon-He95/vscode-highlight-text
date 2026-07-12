@@ -555,7 +555,9 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
-  it('recovers after a synchronous worker factory failure', async () => {
+  it('recovers after a synchronous worker factory failure cooldown', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
     let attempts = 0
     const executor = new RegexExecutor(500, () => {
       attempts++
@@ -565,12 +567,46 @@ describe('regex execution', () => {
     })
     const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
     await expect(executor.execute(request)).rejects.toThrow('ERR_WORKER_INIT_FAILED')
+    await expect(executor.execute(request)).rejects.toThrow('temporarily unavailable')
+    expect(attempts).toBe(1)
+    now = 5_001
     await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
     expect(executor.pendingCount).toBe(0)
     executor.dispose()
   })
 
-  it('recovers after a synchronous postMessage failure', async () => {
+  it('rejects queued jobs without recreating workers during infrastructure cooldown', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let attempts = 0
+    const executor = new RegexExecutor(500, () => {
+      attempts++
+      if (attempts > 1)
+        return createRegexWorker()
+      const worker = new EventEmitter() as any
+      worker.off = worker.removeListener.bind(worker)
+      worker.unref = vi.fn()
+      worker.terminate = vi.fn(async () => 0)
+      worker.postMessage = vi.fn(() => queueMicrotask(() => worker.emit('error', new Error('worker unavailable'))))
+      return worker
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    const first = executor.execute(request)
+    const second = executor.execute(request)
+    const third = executor.execute(request)
+    await expect(first).rejects.toThrow('worker unavailable')
+    await expect(second).rejects.toThrow('temporarily unavailable')
+    await expect(third).rejects.toThrow('temporarily unavailable')
+    expect(attempts).toBe(1)
+    now = 5_001
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(attempts).toBe(2)
+    executor.dispose()
+  })
+
+  it('recovers after a synchronous postMessage failure cooldown', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
     let attempts = 0
     const executor = new RegexExecutor(500, () => {
       attempts++
@@ -587,6 +623,9 @@ describe('regex execution', () => {
     })
     const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
     await expect(executor.execute(request)).rejects.toThrow('postMessage failed')
+    await expect(executor.execute(request)).rejects.toThrow('temporarily unavailable')
+    expect(attempts).toBe(1)
+    now = 5_001
     await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
     expect(executor.pendingCount).toBe(0)
     executor.dispose()

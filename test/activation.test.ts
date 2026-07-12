@@ -259,6 +259,31 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('keeps normal rules before and after an over-budget rule', async () => {
+    const groups = Array.from({ length: 100 }, () => '(x)').join('')
+    configuration.rules = {
+      plaintext: { light: {
+        blue: ['TARGET'],
+        red: { match: [groups], colors: Array.from({ length: 100 }, () => 'red') },
+        green: ['OTHER'],
+      } },
+    }
+    const editor = createEditor(`TARGET ${'x'.repeat(10_100)} OTHER`, 'ordered-span-budget')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('span budget')), 3_000)
+    const types = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    const blueType = types.find(type => type.options.color === 'blue')
+    const greenType = types.find(type => type.options.color === 'green')
+    await waitFor(() => {
+      expect(editor.setDecorations).toHaveBeenCalledWith(blueType, expect.arrayContaining([expect.anything()]))
+      expect(editor.setDecorations).toHaveBeenCalledWith(greenType, expect.arrayContaining([expect.anything()]))
+    })
+    disposeContext(context)
+  })
+
   it('isolates a span-budget rule and still applies later rules', async () => {
     const groups = Array.from({ length: 100 }, () => '(x)').join('')
     configuration.rules = {

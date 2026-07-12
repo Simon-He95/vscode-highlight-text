@@ -33,9 +33,11 @@ const { parentPort } = require('node:worker_threads')
 let cachedText
 let ignoreCache = new Map()
 let ignoreCacheIntervalCount = 0
+let ignoreCacheTextUnits = 0
 let cachedGeneration = -1
 const MAX_IGNORE_INTERVALS = 10000
 const MAX_CACHED_IGNORE_INTERVALS = 20000
+const MAX_CACHED_TEXT_UNITS = 2000000
 
 function advanceStringIndex(text, index, unicode) {
   if (!unicode)
@@ -68,11 +70,13 @@ parentPort.on('message', ({ id, request }) => {
       cachedText = request.text
       ignoreCache = new Map()
       ignoreCacheIntervalCount = 0
+      ignoreCacheTextUnits = 0
     }
     if (request.cacheGeneration !== cachedGeneration) {
       cachedGeneration = request.cacheGeneration
       ignoreCache = new Map()
       ignoreCacheIntervalCount = 0
+      ignoreCacheTextUnits = 0
     }
     if (cachedText === undefined)
       throw new Error('Regular expression worker text is not initialized')
@@ -112,13 +116,6 @@ parentPort.on('message', ({ id, request }) => {
         else
           mergedIgnored.push([...span])
       }
-      while (ignoreCache.size && (ignoreCache.size >= 100 || ignoreCacheIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS)) {
-        const oldest = ignoreCache.keys().next()
-        if (oldest.done)
-          break
-        ignoreCacheIntervalCount -= ignoreCache.get(oldest.value).intervals.length
-        ignoreCache.delete(oldest.value)
-      }
       let maskedText = ''
       let cursor = 0
       for (const [start, end] of mergedIgnored) {
@@ -127,9 +124,23 @@ parentPort.on('message', ({ id, request }) => {
         cursor = end
       }
       maskedText += text.slice(cursor)
+      while (ignoreCache.size && (
+        ignoreCache.size >= 100
+        || ignoreCacheIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS
+        || ignoreCacheTextUnits + maskedText.length > MAX_CACHED_TEXT_UNITS
+      )) {
+        const oldest = ignoreCache.keys().next()
+        if (oldest.done)
+          break
+        const oldestEntry = ignoreCache.get(oldest.value)
+        ignoreCacheIntervalCount -= oldestEntry.intervals.length
+        ignoreCacheTextUnits -= oldestEntry.maskedText.length
+        ignoreCache.delete(oldest.value)
+      }
       ignoreEntry = { intervals: mergedIgnored, maskedText }
       ignoreCache.set(ignoreKey, ignoreEntry)
       ignoreCacheIntervalCount += mergedIgnored.length
+      ignoreCacheTextUnits += maskedText.length
     }
     const mergedIgnored = ignoreEntry.intervals
     const maskedText = ignoreEntry.maskedText
@@ -243,6 +254,13 @@ export class RegexExecutionBudgetError extends Error {
   }
 }
 
+export class RegexExecutionInfrastructureError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegexExecutionInfrastructureError'
+  }
+}
+
 export class RegexExecutionLimitError extends Error {
   constructor(message: string) {
     super(message)
@@ -262,6 +280,10 @@ export function isRegexExecutionBudgetError(error: unknown): error is RegexExecu
   return error instanceof RegexExecutionBudgetError
 }
 
+export function isRegexExecutionInfrastructureError(error: unknown): error is RegexExecutionInfrastructureError {
+  return error instanceof RegexExecutionInfrastructureError
+}
+
 export function isRegexExecutionLimitError(error: unknown): error is RegexExecutionLimitError {
   return error instanceof RegexExecutionLimitError
 }
@@ -277,6 +299,7 @@ export class RegexExecutor {
   private activeCancel?: (error: Error) => void
   private cacheGeneration = 0
   private disposed = false
+  private infrastructureBlockedUntil = 0
   private nextId = 0
   private readonly pending: PendingJob[] = []
   private worker?: WorkerType
@@ -298,6 +321,8 @@ export class RegexExecutor {
   execute(request: WorkerRequest, signal?: AbortSignal): Promise<MatchResult[]> {
     if (this.disposed || signal?.aborted)
       return Promise.reject(new RegexExecutionAbortedError())
+    if (Date.now() < this.infrastructureBlockedUntil)
+      return Promise.reject(new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable'))
 
     return new Promise((resolve, reject) => {
       const job: PendingJob = { request, resolve, reject, signal }
@@ -367,6 +392,14 @@ export class RegexExecutor {
   private drain(): void {
     if (this.disposed || this.active)
       return
+    if (Date.now() < this.infrastructureBlockedUntil) {
+      const error = new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable')
+      for (const job of this.pending.splice(0)) {
+        this.removeAbortListener(job)
+        job.reject(error)
+      }
+      return
+    }
     const job = this.pending.shift()
     if (!job)
       return
@@ -386,7 +419,8 @@ export class RegexExecutor {
       this.activeCancel = undefined
       this.worker = undefined
       this.workerText = undefined
-      job.reject(error instanceof Error ? error : new Error(String(error)))
+      this.blockInfrastructure()
+      job.reject(new RegexExecutionInfrastructureError(error instanceof Error ? error.message : String(error)))
       queueMicrotask(() => this.drain())
     }
   }
@@ -433,8 +467,14 @@ export class RegexExecutor {
         job.resolve(results ?? [])
       this.drain()
     }
-    onError = (error: Error) => finish(error, undefined, true)
-    onExit = () => finish(new Error('Regular expression worker stopped unexpectedly'), undefined, true)
+    onError = (error: Error) => {
+      this.blockInfrastructure()
+      finish(new RegexExecutionInfrastructureError(error.message), undefined, true)
+    }
+    onExit = () => {
+      this.blockInfrastructure()
+      finish(new RegexExecutionInfrastructureError('Regular expression worker stopped unexpectedly'), undefined, true)
+    }
     onMessage = (message: WorkerResponse) => {
       if (message.id !== id)
         return
@@ -465,7 +505,12 @@ export class RegexExecutor {
       this.workerText = text
     }
     catch (error) {
-      finish(error instanceof Error ? error : new Error(String(error)), undefined, true)
+      this.blockInfrastructure()
+      finish(new RegexExecutionInfrastructureError(error instanceof Error ? error.message : String(error)), undefined, true)
     }
+  }
+
+  private blockInfrastructure(): void {
+    this.infrastructureBlockedUntil = Date.now() + 5_000
   }
 }
