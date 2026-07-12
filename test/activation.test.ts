@@ -111,6 +111,19 @@ describe('extension activation orchestration', () => {
     __resetVscodeMock()
   })
 
+  it('does not detect Vue TSX when Vue and Vue TSX rules are identical', async () => {
+    configuration.rules = { 'vue|vuetsx': { light: { red: ['foo'] } } }
+    const editor = createEditor('foo', 'same-vue-rules')
+    editor.document.languageId = 'vue'
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    expect(editor.document.getText).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+  })
+
   it('does not scan an excluded Vue document for TSX blocks', async () => {
     configuration.exclude = ['**/excluded/**']
     configuration.rules = {
@@ -442,6 +455,7 @@ describe('extension activation orchestration', () => {
         light: {
           red: ['(a+)+$'],
           blue: ['(a|aa)+$'],
+          yellow: ['(a+)+$'],
           green: ['NORMAL'],
         },
       },
@@ -457,7 +471,7 @@ describe('extension activation orchestration', () => {
     await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
     await waitFor(() => {
       const timeoutWarnings = vi.mocked(window.showWarningMessage).mock.calls.filter(([message]) => String(message).includes('exceeded 500ms'))
-      expect(timeoutWarnings).toHaveLength(2)
+      expect(timeoutWarnings).toHaveLength(3)
     }, 3_000)
     expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
     await waitFor(() => {

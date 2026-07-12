@@ -14,6 +14,7 @@ const MAX_TOTAL_RULES = 5000
 const MAX_TOTAL_STYLES = 1000
 const MAX_WARNINGS = 100
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
+const STYLE_IDS = new WeakMap<CompiledConfig, Map<string, string>>()
 const LANGUAGE_ALIASES = new Map<string, readonly string[]>([
   ['javascriptreact', ['javascriptreact', 'typescriptreact', 'react']],
   ['markdown', ['markdown', 'md']],
@@ -75,12 +76,20 @@ export function normalizeStyle(raw: Record<string, unknown>): DecorationRenderOp
 }
 
 function addStyle(config: CompiledConfig, style: DecorationRenderOptions): string {
-  const id = stableSerialize(style)
-  if (!config.styles.has(id)) {
-    if (config.styles.size >= MAX_TOTAL_STYLES)
-      throw new Error(`Configuration exceeds ${MAX_TOTAL_STYLES} unique styles`)
-    config.styles.set(id, style)
+  const canonical = stableSerialize(style)
+  const ids = STYLE_IDS.get(config) ?? new Map<string, string>()
+  STYLE_IDS.set(config, ids)
+  const existing = ids.get(canonical)
+  if (existing) {
+    if (!config.styles.has(existing))
+      config.styles.set(existing, style)
+    return existing
   }
+  if (config.styles.size >= MAX_TOTAL_STYLES)
+    throw new Error(`Configuration exceeds ${MAX_TOTAL_STYLES} unique styles`)
+  const id = `s${ids.size}`
+  ids.set(canonical, id)
+  config.styles.set(id, style)
   return id
 }
 

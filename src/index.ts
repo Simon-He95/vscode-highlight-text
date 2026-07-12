@@ -18,12 +18,13 @@ const MAX_TOTAL_SCAN_TIME = 1_000
 const MAX_SESSION_SCAN_TIME = 5_000
 const MAX_JOBS_PER_CHUNK = 25
 const MAX_SESSION_JOBS = 1_000
-const MAX_SESSION_TIMEOUTS = 3
+const MAX_TIMEOUTS_PER_CHUNK = 3
 const MAX_SESSION_CONTINUATIONS = 40
 const MAX_PROFILE_LAYERS = 300
 const REGEX_FAILURE_COOLDOWN = 30_000
 const MAX_REMEMBERED_WARNINGS = 100
 const OVERSCAN_LINES = 20
+const MAX_VUE_LANGUAGE_DETECTION_SIZE = 300_000
 const UPDATE_DELAY = 100
 
 const defaultConfig = {
@@ -61,7 +62,6 @@ interface ScanSession {
   continuationCount: number
   elapsedScanTime: number
   infrastructureRetryCount: number
-  timeoutCount: number
   workerJobCount: number
   key: string
   nextRuleIndex: number
@@ -83,6 +83,12 @@ interface ScanSlice {
   coreStart: number
   scanStart: number
   text: string
+}
+
+function getExecutionDuration(error: unknown): number {
+  return error && typeof error === 'object' && 'executionMs' in error && typeof error.executionMs === 'number'
+    ? error.executionMs
+    : 0
 }
 
 function getDocumentPath(document: TextDocument): string {
@@ -144,7 +150,8 @@ export async function scanRule(
   acceptedMatchOffset: number,
   maxSpans: number,
   refreshSpanBudget: boolean,
-): Promise<{ acceptedMatchCount: number, ranges: Array<{ end: number, start: number, styleId: string }> }> {
+): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }> }> {
+  let executionMs = 0
   const matches = await executor.execute({
     acceptedMatchOffset,
     ignores: rule.ignores,
@@ -155,7 +162,7 @@ export async function scanRule(
     pattern: rule.pattern,
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
-  }, signal)
+  }, signal, durationMs => executionMs = durationMs)
 
   let acceptedMatchCount = 0
   const ranges = matches.flatMap((match) => {
@@ -179,7 +186,7 @@ export async function scanRule(
       acceptedMatchCount++
     return matchRanges
   })
-  return { acceptedMatchCount, ranges }
+  return { acceptedMatchCount, executionMs, ranges }
 }
 
 const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
@@ -193,7 +200,7 @@ export function getRuleLanguageId(document: TextDocument): string {
 
   const documentEnd = Math.min(
     document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end),
-    1_000_000,
+    MAX_VUE_LANGUAGE_DETECTION_SIZE,
   )
   const blockSize = 100_000
   let carry = ''
@@ -215,10 +222,13 @@ export function getRuleLanguageId(document: TextDocument): string {
 }
 
 function getRuleSelection(config: CompiledConfig, document: TextDocument) {
-  const languageId = document.languageId === 'vue' && config.languages.has('vuetsx')
+  const dark = isDarkTheme()
+  const vueRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vue', dark) : []
+  const vueTsxRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vuetsx', dark) : []
+  const languageId = document.languageId === 'vue'
+    && (vueRules.length !== vueTsxRules.length || vueRules.some((rule, index) => rule !== vueTsxRules[index]))
     ? getRuleLanguageId(document)
     : document.languageId
-  const dark = isDarkTheme()
   const warnings: string[] = []
   const sourceRules = getRulesForLanguage(config, languageId, dark, warnings)
   const priorityStyleIds: Array<{ id: string, styleId: string }> = []
@@ -228,7 +238,7 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
       return []
     }
     const targets = rule.targets.map((target, targetIndex) => {
-      const decorationId = JSON.stringify([ruleIndex, targetIndex, target.styleId])
+      const decorationId = `d${ruleIndex}:${targetIndex}`
       priorityStyleIds.push({ id: decorationId, styleId: target.styleId })
       return { ...target, decorationId }
     })
@@ -345,7 +355,6 @@ export function activate(context: ExtensionContext): void {
         elapsedScanTime: 0,
         failedRuleIds: new Set(),
         infrastructureRetryCount: 0,
-        timeoutCount: 0,
         workerJobCount: 0,
         key: sessionKey,
         nextRuleIndex: 0,
@@ -364,6 +373,7 @@ export function activate(context: ExtensionContext): void {
     let needsContinuation = false
     let sessionLimitReached = false
     let chunkJobCount = 0
+    let chunkTimeoutCount = 0
 
     while (session.nextRuleIndex < rules.length) {
       if (!isCurrent())
@@ -397,16 +407,14 @@ export function activate(context: ExtensionContext): void {
         if (
           session.elapsedScanTime >= MAX_SESSION_SCAN_TIME
           || session.workerJobCount >= MAX_SESSION_JOBS
-          || session.timeoutCount >= MAX_SESSION_TIMEOUTS
         ) {
           sessionLimitReached = true
           break
         }
-        if (chunkJobCount >= MAX_JOBS_PER_CHUNK) {
+        if (chunkJobCount >= MAX_JOBS_PER_CHUNK || chunkTimeoutCount >= MAX_TIMEOUTS_PER_CHUNK) {
           needsContinuation = true
           break
         }
-        const jobStartedAt = Date.now()
         try {
           const scanResult = await scanRule(
             executor,
@@ -420,7 +428,7 @@ export function activate(context: ExtensionContext): void {
           )
           if (!isCurrent())
             return
-          session.elapsedScanTime += Date.now() - jobStartedAt
+          session.elapsedScanTime += scanResult.executionMs
           session.workerJobCount++
           chunkJobCount++
           for (const match of scanResult.ranges) {
@@ -443,7 +451,7 @@ export function activate(context: ExtensionContext): void {
         catch (error) {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
-          session.elapsedScanTime += Date.now() - jobStartedAt
+          session.elapsedScanTime += getExecutionDuration(error)
           session.workerJobCount++
           chunkJobCount++
           ruleFailed = true
@@ -454,7 +462,7 @@ export function activate(context: ExtensionContext): void {
             warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`)
           }
           else if (isRegexExecutionTimeoutError(error)) {
-            session.timeoutCount++
+            chunkTimeoutCount++
             session.failedRuleIds.add(rule.id)
             failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
@@ -658,7 +666,7 @@ export function activate(context: ExtensionContext): void {
       try {
         nextManager = new DecorationManager(nextCompiled.styles)
         for (const editor of window.visibleTextEditors) {
-          if (!nextFilter(editor.document.uri.path) || !editor.visibleRanges.length)
+          if (!nextFilter(getDocumentPath(editor.document)) || !editor.visibleRanges.length)
             continue
           const selection = getRuleSelection(nextCompiled, editor.document)
           nextManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)

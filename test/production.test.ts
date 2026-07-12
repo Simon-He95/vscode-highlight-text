@@ -410,7 +410,7 @@ describe('regex execution', () => {
       coreStart: 1,
       scanStart: 0,
       text: '\nfooX',
-    }, new AbortController().signal, 10, 0, 10, false)).resolves.toEqual({ acceptedMatchCount: 0, ranges: [] })
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ acceptedMatchCount: 0, ranges: [] })
     executor.dispose()
   })
 
@@ -752,6 +752,34 @@ describe('regex execution', () => {
     now = 5_001
     await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
     expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
+  it('reports active execution time without charging queued wait time', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const worker = new EventEmitter() as any
+    const ids: number[] = []
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.terminate = vi.fn(async () => 0)
+    worker.postMessage = vi.fn(({ id }: { id: number }) => ids.push(id))
+    const executor = new RegexExecutor(10_000, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    let firstDuration = -1
+    let secondDuration = -1
+    const first = executor.execute(request, undefined, duration => firstDuration = duration)
+    const second = executor.execute(request, undefined, duration => secondDuration = duration)
+    expect(ids).toHaveLength(1)
+    now = 4_000
+    worker.emit('message', { id: ids[0], results: [{ spans: [[0, 1]] }] })
+    await first
+    expect(ids).toHaveLength(2)
+    now = 4_001
+    worker.emit('message', { id: ids[1], results: [{ spans: [[0, 1]] }] })
+    await second
+    expect(firstDuration).toBe(4_000)
+    expect(secondDuration).toBe(1)
     executor.dispose()
   })
 

@@ -24,6 +24,7 @@ interface WorkerResponse {
 
 interface PendingJob {
   onAbort?: () => void
+  onExecutionComplete?: (durationMs: number) => void
   reject: (error: Error) => void
   request: WorkerRequest
   resolve: (results: MatchResult[]) => void
@@ -347,14 +348,14 @@ export class RegexExecutor {
     this.cacheGeneration++
   }
 
-  execute(request: WorkerRequest, signal?: AbortSignal): Promise<MatchResult[]> {
+  execute(request: WorkerRequest, signal?: AbortSignal, onExecutionComplete?: (durationMs: number) => void): Promise<MatchResult[]> {
     if (this.disposed || signal?.aborted)
       return Promise.reject(new RegexExecutionAbortedError())
     if (Date.now() < this.infrastructureBlockedUntil)
       return Promise.reject(new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable', this.infrastructureBlockedUntil - Date.now()))
 
     return new Promise((resolve, reject) => {
-      const job: PendingJob = { request, resolve, reject, signal }
+      const job: PendingJob = { onExecutionComplete, request, resolve, reject, signal }
       if (signal) {
         job.onAbort = () => this.cancel(job)
         signal.addEventListener('abort', job.onAbort, { once: true })
@@ -467,6 +468,7 @@ export class RegexExecutor {
     const worker = this.worker ?? this.createWorker()
     const id = ++this.nextId
     let settled = false
+    let executionStartedAt: number | undefined
     let timer: ReturnType<typeof setTimeout>
     let onError: (error: Error) => void
     let onExit: () => void
@@ -487,6 +489,12 @@ export class RegexExecutor {
         return
       settled = true
       cleanup()
+      if (executionStartedAt !== undefined) {
+        const executionMs = Date.now() - executionStartedAt
+        if (error)
+          Object.defineProperty(error, 'executionMs', { configurable: true, value: executionMs })
+        job.onExecutionComplete?.(executionMs)
+      }
       if (terminate) {
         if (this.worker === worker) {
           this.worker = undefined
@@ -547,6 +555,7 @@ export class RegexExecutor {
       const request = this.workerText === text
         ? { ...rest, cacheGeneration: this.cacheGeneration }
         : { ...job.request, cacheGeneration: this.cacheGeneration }
+      executionStartedAt = Date.now()
       worker.postMessage({ id, request })
       this.workerText = text
     }
