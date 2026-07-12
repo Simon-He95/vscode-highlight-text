@@ -187,6 +187,21 @@ describe('regex configuration', () => {
     expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern.source)).toEqual(['foo', 'gm'])
   })
 
+  it('fails closed when any ignoreReg pattern is invalid', () => {
+    const invalidOnly = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['('] } } } })
+    const mixed = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', '('] } } } })
+    const invalidType = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', 123] } } } })
+    const invalidTuple = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', ['broken-tuple']] } } } })
+    expect(getRulesForLanguage(invalidOnly, 'plaintext', false)).toEqual([])
+    expect(getRulesForLanguage(mixed, 'plaintext', false)).toEqual([])
+    expect(getRulesForLanguage(invalidType, 'plaintext', false)).toEqual([])
+    expect(getRulesForLanguage(invalidTuple, 'plaintext', false)).toEqual([])
+    expect(invalidOnly.styles.size).toBe(0)
+    expect(mixed.styles.size).toBe(0)
+    expect(invalidType.styles.size).toBe(0)
+    expect(invalidTuple.styles.size).toBe(0)
+  })
+
   it('accepts an empty ignoreReg without warnings', () => {
     const compiled = compileConfig({ vue: { light: { red: { match: ['foo'], ignoreReg: [] } } } })
     expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(1)
@@ -790,6 +805,28 @@ describe('decoration lifecycle', () => {
     ]))
     expect(() => manager.prepareProfile('test', ['a', 'b'])).toThrow('invalid style')
     expect(partial.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('quarantines a failed profile and clears an editor previous profile', () => {
+    const goodType = { dispose: vi.fn() }
+    const partialType = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => goodType as any)
+      .mockImplementationOnce(() => partialType as any)
+      .mockImplementationOnce(() => { throw new Error('invalid deferred profile') })
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['good', { color: 'green' }],
+      ['bad-a', { color: 'red' }],
+      ['bad-b', { color: 'blue' }],
+    ]))
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([['good', [range(0, 1)]]]), 'good', ['good'])
+    expect(() => manager.apply(editor, new Map(), 'bad', ['bad-a', 'bad-b'])).toThrow('invalid deferred profile')
+    expect(partialType.dispose).toHaveBeenCalledTimes(1)
+    expect(goodType.dispose).toHaveBeenCalledTimes(1)
+    expect(() => manager.prepareProfile('bad', ['bad-a', 'bad-b'])).toThrow('invalid deferred profile')
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(3)
+    manager.dispose()
   })
 
   it('creates language profiles in explicit high-to-low priority order', () => {

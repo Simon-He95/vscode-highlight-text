@@ -128,14 +128,24 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('stays active with an empty manager when initial type creation fails', () => {
-    const editor = createEditor('foo', 'initial-failure')
-    window.visibleTextEditors = [editor] as any
+  it('disposes completed profiles when a later initial profile fails', () => {
+    configuration.rules = {
+      languageA: { light: { red: ['foo'] } },
+      languageB: { light: { blue: ['foo'] } },
+    }
+    const first = createEditor('foo', 'initial-first')
+    first.document.languageId = 'languageA'
+    const second = createEditor('foo', 'initial-second')
+    second.document.languageId = 'languageB'
+    window.visibleTextEditors = [first, second] as any
+    const completedType = { dispose: vi.fn() }
     vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => completedType as any)
       .mockImplementationOnce(() => { throw new Error('invalid initial style') })
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     expect(() => activate(context)).not.toThrow()
+    expect(completedType.dispose).toHaveBeenCalledTimes(1)
     expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Failed to apply initial configuration'))
     disposeContext(context)
   })

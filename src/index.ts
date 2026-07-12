@@ -184,16 +184,18 @@ export function activate(context: ExtensionContext): void {
   let shouldProcess = getExcludeFilter()
   let initialManagerError: unknown
   let manager: DecorationManager
+  const candidateManager = new DecorationManager(compiled.styles)
   try {
-    manager = new DecorationManager(compiled.styles)
     for (const editor of window.visibleTextEditors) {
       if (!shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length)
         continue
       const selection = getRuleSelection(compiled, editor.document)
-      manager.prepareProfile(selection.profileId, selection.priorityStyleIds)
+      candidateManager.prepareProfile(selection.profileId, selection.priorityStyleIds)
     }
+    manager = candidateManager
   }
   catch (error) {
+    candidateManager.dispose()
     initialManagerError = error
     compiled = { languages: new Map(), styles: new Map(), warnings: compiled.warnings }
     manager = new DecorationManager(new Map())

@@ -9,7 +9,7 @@ pnpm check
 The Vitest suite imports production modules directly and covers:
 
 - input-attempt-budgeted configuration compilation, transactional style registration, malformed settings, capped warnings/toasts, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
-- lookarounds, named groups, advisory diagnostics for main/ignore patterns, single-pass no-ignore execution, and masked candidates with sticky original-text validation;
+- lookarounds, named groups, fail-closed invalid ignore patterns, advisory diagnostics, single-pass no-ignore execution, and masked candidates with sticky original-text validation;
 - Unicode-aware zero-width matching;
 - worker-enforced timeout, infrastructure circuit breaking, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
 - sticky, explicit-empty, and document-relative `^`/`$` slice-boundary semantics;
@@ -22,7 +22,7 @@ The Vitest suite imports production modules directly and covers:
 - initial activation fallback, transactional rule changes, lightweight exclude-only updates, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits, duplicate-range removal, and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-interval/cache state, masked-text cache size, cache generations, and reuse of unchanged slice text inside the worker;
-- per-editor executors and language/theme decoration profiles with deterministic priority ordering, transactional creation, split-editor reuse, cleanup, and disposal.
+- per-editor executors and language/theme decoration profiles with deterministic priority ordering, transactional creation, failed-profile quarantine, split-editor reuse, cleanup, and disposal.
 
 CI additionally:
 

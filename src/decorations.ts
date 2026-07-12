@@ -9,6 +9,7 @@ interface DecorationProfile {
 export class DecorationManager {
   private readonly activeStyles = new WeakMap<TextEditor, Set<string>>()
   private disposed = false
+  private readonly failedProfiles = new Map<string, Error>()
   private readonly editorProfiles = new WeakMap<TextEditor, string>()
   private readonly profiles = new Map<string, DecorationProfile>()
 
@@ -17,6 +18,9 @@ export class DecorationManager {
   prepareProfile(profileId: string, priorityStyleIds: string[]): void {
     if (this.disposed || this.profiles.has(profileId))
       return
+    const previousError = this.failedProfiles.get(profileId)
+    if (previousError)
+      throw previousError
     const types = new Map<string, TextEditorDecorationType>()
     try {
       for (const styleId of new Set(priorityStyleIds)) {
@@ -28,7 +32,9 @@ export class DecorationManager {
     }
     catch (error) {
       this.disposeTypes(types)
-      throw error
+      const profileError = error instanceof Error ? error : new Error(String(error))
+      this.failedProfiles.set(profileId, profileError)
+      throw profileError
     }
   }
 
@@ -40,8 +46,15 @@ export class DecorationManager {
   ): void {
     if (this.disposed)
       return
-    this.prepareProfile(profileId, priorityStyleIds)
     const previousProfileId = this.editorProfiles.get(editor)
+    try {
+      this.prepareProfile(profileId, priorityStyleIds)
+    }
+    catch (error) {
+      if (previousProfileId)
+        this.detachEditor(editor, previousProfileId)
+      throw error
+    }
     if (previousProfileId && previousProfileId !== profileId)
       this.detachEditor(editor, previousProfileId)
 

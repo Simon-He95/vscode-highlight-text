@@ -189,6 +189,11 @@ function compileStyleRules(
       return []
     }
     const ignorePatterns = normalizePatternsWithBudget(option.ignoreReg, budget, MAX_IGNORE_PATTERNS_PER_RULE)
+    if (ignorePatterns.length !== option.ignoreReg.length) {
+      config.warnings.push(`Invalid ignoreReg entries for ${context}: expected patterns`)
+      return []
+    }
+    let invalidIgnore = false
     ignores = ignorePatterns.flatMap((input) => {
       try {
         const pattern = compilePattern(input)
@@ -197,10 +202,13 @@ function compileStyleRules(
         return [pattern]
       }
       catch (error) {
+        invalidIgnore = true
         config.warnings.push(`Invalid ignoreReg for ${context}: ${error instanceof Error ? error.message : String(error)}`)
         return []
       }
     })
+    if (invalidIgnore)
+      return []
   }
 
   return patterns.flatMap((input) => {
