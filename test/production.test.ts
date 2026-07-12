@@ -193,6 +193,15 @@ describe('regex configuration', () => {
     expect(compiled.warnings).toEqual([])
   })
 
+  it('uses collision-free structured rule identifiers', () => {
+    const compiled = compileConfig({ plaintext: { light: {
+      'red:a': { match: ['b'], color: 'red' },
+      'red': { match: ['a:b'], color: 'blue' },
+    } } })
+    const ids = getRulesForLanguage(compiled, 'plaintext', false).map(rule => rule.id)
+    expect(new Set(ids).size).toBe(2)
+  })
+
   it('preserves React aliases across JSX and TSX', () => {
     const compiled = compileConfig({
       react: { light: { red: ['react-rule'] } },
@@ -274,6 +283,39 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: 'foo',
     })).resolves.toEqual([{ spans: [[0, 3]] }])
+    executor.dispose()
+  })
+
+  it('preserves document anchor semantics when slices include boundary context', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '^foo', flags: 'gd' },
+      targetGroups: [0],
+      text: '\nfooX',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'foo$', flags: 'gd' },
+      targetGroups: [0],
+      text: 'Xfoo\nX',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '^foo', flags: 'gmd' },
+      targetGroups: [0],
+      text: '\nfooX',
+    })).resolves.toEqual([{ spans: [[1, 4]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'foo$', flags: 'gmd' },
+      targetGroups: [0],
+      text: 'Xfoo\nX',
+    })).resolves.toEqual([{ spans: [[1, 4]] }])
     executor.dispose()
   })
 
@@ -678,11 +720,12 @@ describe('scheduler lifecycle', () => {
   it('prevents an asynchronous tail from applying after dispose', async () => {
     let release!: () => void
     const manager = new DecorationManager(new Map([['a', { color: 'red' }]]))
+    manager.prepareProfile('test', ['a'])
     const editor = new MockEditor() as any
     const scheduler = new LatestTaskScheduler<object>(async (_key, task) => {
       await new Promise<void>(resolve => release = resolve)
       if (task.isCurrent())
-        manager.apply(editor, new Map([['a', [range(0, 1)]]]))
+        manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'test', ['a'])
     }, 0)
     scheduler.schedule({}, true)
     await Promise.resolve()
@@ -702,11 +745,42 @@ describe('decoration lifecycle', () => {
       .mockImplementationOnce(() => partial as any)
       .mockImplementationOnce(() => { throw new Error('invalid style') })
 
-    expect(() => new DecorationManager(new Map<string, DecorationRenderOptions>([
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
       ['a', { color: 'red' }],
       ['b', { color: 'blue' }],
-    ]))).toThrow('invalid style')
+    ]))
+    expect(() => manager.prepareProfile('test', ['a', 'b'])).toThrow('invalid style')
     expect(partial.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('creates language profiles in explicit high-to-low priority order', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['react', { color: 'red' }],
+      ['jsx', { color: 'blue' }],
+      ['tsx', { color: 'green' }],
+    ]))
+    manager.prepareProfile('javascriptreact:light', ['jsx', 'tsx', 'react'])
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
+      [{ color: 'blue' }],
+      [{ color: 'green' }],
+      [{ color: 'red' }],
+    ])
+    manager.dispose()
+  })
+
+  it('shares a profile across split editors and disposes it after the last editor leaves', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const first = new MockEditor() as any
+    const second = new MockEditor() as any
+    manager.apply(first, new Map([['a', [range(0, 1)]]]), 'plaintext:light', ['a'])
+    manager.apply(second, new Map([['a', [range(0, 1)]]]), 'plaintext:light', ['a'])
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    manager.clear(first)
+    expect(type.dispose).not.toHaveBeenCalled()
+    manager.clear(second)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
   })
 
   it('reuses types, batches ranges, and never recreates after dispose', () => {
@@ -714,19 +788,20 @@ describe('decoration lifecycle', () => {
       ['a', { color: 'red' }],
       ['c', { color: 'blue' }],
     ]))
+    manager.prepareProfile('test', ['a', 'c'])
     expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
       [{ color: 'red' }],
       [{ color: 'blue' }],
     ])
     const editor = new MockEditor() as any
     for (let iteration = 0; iteration < 100; iteration++) {
-      manager.apply(editor, new Map([['a', [range(0, 1), range(2, 3)]], ['c', [range(4, 5)]]]))
+      manager.apply(editor, new Map([['a', [range(0, 1), range(2, 3)]], ['c', [range(4, 5)]]]), 'test', ['a', 'c'])
     }
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
     const created = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
     manager.dispose()
     manager.dispose()
-    manager.apply(editor, new Map([['a', [range(0, 1)]]]))
+    manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'test', ['a'])
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
     created.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
   })

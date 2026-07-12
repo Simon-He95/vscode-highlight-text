@@ -1,25 +1,57 @@
 import type { DecorationRenderOptions, Range, TextEditor, TextEditorDecorationType } from 'vscode'
 import { window } from 'vscode'
 
+interface DecorationProfile {
+  editors: Set<TextEditor>
+  types: Map<string, TextEditorDecorationType>
+}
+
 export class DecorationManager {
   private readonly activeStyles = new WeakMap<TextEditor, Set<string>>()
   private disposed = false
-  private readonly editors = new Set<TextEditor>()
-  private types: Map<string, TextEditorDecorationType>
+  private readonly editorProfiles = new WeakMap<TextEditor, string>()
+  private readonly profiles = new Map<string, DecorationProfile>()
 
-  constructor(private styles: Map<string, DecorationRenderOptions>) {
-    this.types = this.createTypes(styles)
+  constructor(private readonly styles: Map<string, DecorationRenderOptions>) {}
+
+  prepareProfile(profileId: string, priorityStyleIds: string[]): void {
+    if (this.disposed || this.profiles.has(profileId))
+      return
+    const types = new Map<string, TextEditorDecorationType>()
+    try {
+      for (const styleId of new Set(priorityStyleIds)) {
+        const options = this.styles.get(styleId)
+        if (options)
+          types.set(styleId, window.createTextEditorDecorationType(options))
+      }
+      this.profiles.set(profileId, { editors: new Set(), types })
+    }
+    catch (error) {
+      this.disposeTypes(types)
+      throw error
+    }
   }
 
-  apply(editor: TextEditor, rangesByStyle: Map<string, Range[]>): void {
+  apply(
+    editor: TextEditor,
+    rangesByStyle: Map<string, Range[]>,
+    profileId: string,
+    priorityStyleIds: string[],
+  ): void {
     if (this.disposed)
       return
-    this.editors.add(editor)
+    this.prepareProfile(profileId, priorityStyleIds)
+    const previousProfileId = this.editorProfiles.get(editor)
+    if (previousProfileId && previousProfileId !== profileId)
+      this.detachEditor(editor, previousProfileId)
+
+    const profile = this.profiles.get(profileId)!
+    profile.editors.add(editor)
+    this.editorProfiles.set(editor, profileId)
     const previous = this.activeStyles.get(editor) ?? new Set<string>()
     const current = new Set<string>()
-
     for (const [styleId, ranges] of rangesByStyle) {
-      const type = this.types.get(styleId)
+      const type = profile.types.get(styleId)
       if (!type)
         continue
       editor.setDecorations(type, ranges)
@@ -27,7 +59,7 @@ export class DecorationManager {
     }
     for (const styleId of previous) {
       if (!current.has(styleId))
-        this.clearStyle(editor, styleId)
+        this.clearStyle(editor, profile, styleId)
     }
     this.activeStyles.set(editor, current)
   }
@@ -35,27 +67,42 @@ export class DecorationManager {
   clear(editor: TextEditor): void {
     if (this.disposed)
       return
-    for (const styleId of this.activeStyles.get(editor) ?? [])
-      this.clearStyle(editor, styleId)
-    this.activeStyles.delete(editor)
-    this.editors.delete(editor)
+    const profileId = this.editorProfiles.get(editor)
+    if (profileId)
+      this.detachEditor(editor, profileId)
   }
 
   dispose(): void {
     if (this.disposed)
       return
     this.disposed = true
-    for (const editor of this.editors) {
-      for (const styleId of this.activeStyles.get(editor) ?? [])
-        this.clearStyle(editor, styleId)
+    for (const profile of this.profiles.values()) {
+      for (const editor of profile.editors) {
+        for (const styleId of this.activeStyles.get(editor) ?? [])
+          this.clearStyle(editor, profile, styleId)
+      }
+      this.disposeTypes(profile.types)
     }
-    this.editors.clear()
-    this.disposeTypes(this.types)
-    this.types.clear()
+    this.profiles.clear()
   }
 
-  private clearStyle(editor: TextEditor, styleId: string): void {
-    const type = this.types.get(styleId)
+  private detachEditor(editor: TextEditor, profileId: string): void {
+    const profile = this.profiles.get(profileId)
+    if (!profile)
+      return
+    for (const styleId of this.activeStyles.get(editor) ?? [])
+      this.clearStyle(editor, profile, styleId)
+    this.activeStyles.delete(editor)
+    this.editorProfiles.delete(editor)
+    profile.editors.delete(editor)
+    if (!profile.editors.size) {
+      this.disposeTypes(profile.types)
+      this.profiles.delete(profileId)
+    }
+  }
+
+  private clearStyle(editor: TextEditor, profile: DecorationProfile, styleId: string): void {
+    const type = profile.types.get(styleId)
     if (!type)
       return
     try {
@@ -63,19 +110,6 @@ export class DecorationManager {
     }
     catch {
       // Continue cleanup for the remaining editors and decoration types.
-    }
-  }
-
-  private createTypes(styles: Map<string, DecorationRenderOptions>): Map<string, TextEditorDecorationType> {
-    const types = new Map<string, TextEditorDecorationType>()
-    try {
-      for (const [styleId, options] of styles)
-        types.set(styleId, window.createTextEditorDecorationType(options))
-      return types
-    }
-    catch (error) {
-      this.disposeTypes(types)
-      throw error
     }
   }
 

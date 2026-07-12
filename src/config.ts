@@ -210,7 +210,7 @@ function compileStyleRules(
         config.warnings.push(`Potentially expensive regular expression for ${context}: ${pattern.source}`)
       return [{
         context,
-        id: `${context}:${pattern.source}/${pattern.flags}`,
+        id: JSON.stringify([context, pattern.source, pattern.flags]),
         ignores,
         pattern,
         targets,

@@ -12,7 +12,21 @@ The Vitest suite imports production modules directly and covers:
 - lookarounds, named groups, advisory diagnostics for main/ignore patterns, single-pass no-ignore execution, and masked candidates with sticky original-text validation;
 - Unicode-aware zero-width matching;
 - worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
-- sticky and explicit-empty flag semantics;
+- sticky, explicit-empty, and document-relative `^`/`# Test coverage
+
+Run the repository quality gate with:
+
+```bash
+pnpm check
+```
+
+The Vitest suite imports production modules directly and covers:
+
+- input-attempt-budgeted configuration compilation, transactional style registration, malformed settings, capped warnings/toasts, RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
+- lookarounds, named groups, advisory diagnostics for main/ignore patterns, single-pass no-ignore execution, and masked candidates with sticky original-text validation;
+- Unicode-aware zero-width matching;
+- worker-enforced timeout, active cancellation, queued cancellation, constructor/postMessage failure recovery, and ignore/main-scan truncation;
+ slice-boundary semantics;
 - engine-provided indices for repeated, optional, and lookbehind captures;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
 - document-scoped rule cooldowns, document-versioned rule snapshots, global language/rule/style/target/ignore/span limits, and total refresh range/time budgets;
@@ -21,8 +35,8 @@ The Vitest suite imports production modules directly and covers:
 - disposal during asynchronous work without late decoration creation;
 - initial activation fallback, transactional rule changes, lightweight exclude-only updates, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits, duplicate-range removal, and preservation of the last complete snapshot when refresh budgets expire;
-- bounded warning/ignore-interval/cache state, cache generations, and reuse of unchanged slice text inside the worker;
-- per-editor executors and deterministic, transactional decoration type creation, batching, reuse, cleanup, and disposal.
+- bounded warning/ignore-interval/cache state, cached masked text, cache generations, and reuse of unchanged slice text inside the worker;
+- per-editor executors and language/theme decoration profiles with deterministic priority ordering, transactional creation, split-editor reuse, cleanup, and disposal.
 
 CI additionally:
 

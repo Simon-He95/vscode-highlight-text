@@ -79,8 +79,8 @@ parentPort.on('message', ({ id, request }) => {
     const text = cachedText
     const maxIgnoreMatches = Math.max(request.maxMatches, 1000)
     const ignoreKey = JSON.stringify([request.ignores, maxIgnoreMatches])
-    let mergedIgnored = ignoreCache.get(ignoreKey)
-    if (!mergedIgnored) {
+    let ignoreEntry = ignoreCache.get(ignoreKey)
+    if (!ignoreEntry) {
       const ignored = []
       for (const pattern of request.ignores) {
         const regex = new RegExp(pattern.source, pattern.flags)
@@ -104,7 +104,7 @@ parentPort.on('message', ({ id, request }) => {
       }
 
       ignored.sort((a, b) => a[0] - b[0] || a[1] - b[1])
-      mergedIgnored = []
+      const mergedIgnored = []
       for (const span of ignored) {
         const previous = mergedIgnored[mergedIgnored.length - 1]
         if (previous && span[0] <= previous[1])
@@ -116,20 +116,23 @@ parentPort.on('message', ({ id, request }) => {
         const oldest = ignoreCache.keys().next()
         if (oldest.done)
           break
-        ignoreCacheIntervalCount -= ignoreCache.get(oldest.value).length
+        ignoreCacheIntervalCount -= ignoreCache.get(oldest.value).intervals.length
         ignoreCache.delete(oldest.value)
       }
-      ignoreCache.set(ignoreKey, mergedIgnored)
+      let maskedText = ''
+      let cursor = 0
+      for (const [start, end] of mergedIgnored) {
+        const ignoredText = text.slice(start, end).replace(/[^\r\n]/g, ' ')
+        maskedText += text.slice(cursor, start) + ignoredText
+        cursor = end
+      }
+      maskedText += text.slice(cursor)
+      ignoreEntry = { intervals: mergedIgnored, maskedText }
+      ignoreCache.set(ignoreKey, ignoreEntry)
       ignoreCacheIntervalCount += mergedIgnored.length
     }
-    let maskedText = ''
-    let cursor = 0
-    for (const [start, end] of mergedIgnored) {
-      const ignoredText = text.slice(start, end).replace(/[^\r\n]/g, ' ')
-      maskedText += text.slice(cursor, start) + ignoredText
-      cursor = end
-    }
-    maskedText += text.slice(cursor)
+    const mergedIgnored = ignoreEntry.intervals
+    const maskedText = ignoreEntry.maskedText
 
     function overlapsIgnored(span) {
       let low = 0

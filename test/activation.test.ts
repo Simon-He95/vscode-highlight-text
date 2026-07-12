@@ -129,12 +129,40 @@ describe('extension activation orchestration', () => {
   })
 
   it('stays active with an empty manager when initial type creation fails', () => {
+    const editor = createEditor('foo', 'initial-failure')
+    window.visibleTextEditors = [editor] as any
     vi.mocked(window.createTextEditorDecorationType)
       .mockImplementationOnce(() => { throw new Error('invalid initial style') })
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     expect(() => activate(context)).not.toThrow()
     expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Failed to apply initial configuration'))
+    disposeContext(context)
+  })
+
+  it('creates exact-language decoration profiles before generic aliases', async () => {
+    configuration.rules = {
+      react: { light: { red: ['foo'] } },
+      javascriptreact: { light: { blue: ['foo'] } },
+      typescriptreact: { light: { green: ['foo'] } },
+    }
+    const jsx = createEditor('foo', 'jsx-priority')
+    jsx.document.languageId = 'javascriptreact'
+    const tsx = createEditor('foo', 'tsx-priority')
+    tsx.document.languageId = 'typescriptreact'
+    window.visibleTextEditors = [jsx, tsx] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(6))
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls.map(([options]) => options.color)).toEqual([
+      'blue',
+      'green',
+      'red',
+      'green',
+      'blue',
+      'red',
+    ])
     disposeContext(context)
   })
 
@@ -391,7 +419,8 @@ describe('extension activation orchestration', () => {
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     activate(context)
-    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
     const firstTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
 
     editor.setDecorations.mockClear()
@@ -399,7 +428,7 @@ describe('extension activation orchestration', () => {
     await __events.theme.fire(window.activeColorTheme)
     await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
-    firstTypes.forEach(type => expect(type.dispose).not.toHaveBeenCalled())
+    firstTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
 
     editor.setDecorations.mockClear()
     vi.mocked(window.createTextEditorDecorationType).mockClear()

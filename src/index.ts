@@ -53,8 +53,9 @@ interface ScanPlan {
 }
 
 interface ScanSlice {
-  end: number
-  start: number
+  coreEnd: number
+  coreStart: number
+  scanStart: number
   text: string
 }
 
@@ -85,18 +86,21 @@ function getScanSlices(editor: TextEditor): ScanPlan {
   }
 
   const scanKey = merged.map(range => `${range.start}:${range.end}`).join(',')
-  const totalSize = merged.reduce((total, range) => total + range.end - range.start, 0)
+  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
+  const slices = merged.map(({ start, end }) => {
+    const scanStart = Math.max(0, start - 1)
+    const scanEnd = Math.min(documentEnd, end + 1)
+    return {
+      coreStart: start,
+      coreEnd: end,
+      scanStart,
+      text: document.getText(new Range(document.positionAt(scanStart), document.positionAt(scanEnd))),
+    }
+  })
+  const totalSize = slices.reduce((total, slice) => total + slice.text.length, 0)
   if (totalSize > MAX_SCAN_SIZE)
     return { complete: false, scanKey, slices: [] }
-  return {
-    complete: true,
-    scanKey,
-    slices: merged.map(({ start, end }) => ({
-      start,
-      end,
-      text: document.getText(new Range(document.positionAt(start), document.positionAt(end))),
-    })),
-  }
+  return { complete: true, scanKey, slices }
 }
 
 async function scanRule(
@@ -118,13 +122,15 @@ async function scanRule(
     text: slice.text,
   }, signal)
 
-  return matches.flatMap(match => match.spans.flatMap((span, index) => span
-    ? [{
-        start: slice.start + span[0],
-        end: slice.start + span[1],
-        styleId: rule.targets[index].styleId,
-      }]
-    : []))
+  return matches.flatMap(match => match.spans.flatMap((span, index) => {
+    if (!span)
+      return []
+    const start = slice.scanStart + span[0]
+    const end = slice.scanStart + span[1]
+    return start >= slice.coreStart && end <= slice.coreEnd
+      ? [{ start, end, styleId: rule.targets[index].styleId }]
+      : []
+  }))
 }
 
 const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
@@ -159,11 +165,17 @@ export function getRuleLanguageId(document: TextDocument): string {
   return result
 }
 
-function getRules(config: CompiledConfig, document: TextDocument): CompiledRule[] {
+function getRuleSelection(config: CompiledConfig, document: TextDocument) {
   const languageId = document.languageId === 'vue' && config.languages.has('vuetsx')
     ? getRuleLanguageId(document)
     : document.languageId
-  return getRulesForLanguage(config, languageId, isDarkTheme())
+  const dark = isDarkTheme()
+  const rules = getRulesForLanguage(config, languageId, dark)
+  return {
+    priorityStyleIds: [...new Set(rules.flatMap(rule => rule.targets.map(target => target.styleId)))],
+    profileId: `${languageId}:${dark ? 'dark' : 'light'}`,
+    rules,
+  }
 }
 
 export function activate(context: ExtensionContext): void {
@@ -174,6 +186,12 @@ export function activate(context: ExtensionContext): void {
   let manager: DecorationManager
   try {
     manager = new DecorationManager(compiled.styles)
+    for (const editor of window.visibleTextEditors) {
+      if (!shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length)
+        continue
+      const selection = getRuleSelection(compiled, editor.document)
+      manager.prepareProfile(selection.profileId, selection.priorityStyleIds)
+    }
   }
   catch (error) {
     initialManagerError = error
@@ -231,7 +249,7 @@ export function activate(context: ExtensionContext): void {
         clearEditor()
       return
     }
-    const rules = getRules(compiled, document)
+    const { priorityStyleIds, profileId, rules } = getRuleSelection(compiled, document)
     if (!rules.length) {
       if (isCurrent())
         clearEditor()
@@ -361,7 +379,7 @@ export function activate(context: ExtensionContext): void {
         return
       }
       ruleSnapshots.set(editor, nextSnapshots)
-      manager.apply(editor, rangesByStyle)
+      manager.apply(editor, rangesByStyle, profileId, priorityStyleIds)
     }
   }
 
@@ -440,11 +458,18 @@ export function activate(context: ExtensionContext): void {
       }
       const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
       const nextFilter = excludeChanged ? getExcludeFilter() : shouldProcess
-      let nextManager: DecorationManager
+      let nextManager: DecorationManager | undefined
       try {
         nextManager = new DecorationManager(nextCompiled.styles)
+        for (const editor of window.visibleTextEditors) {
+          if (!nextFilter(editor.document.uri.path) || !editor.visibleRanges.length)
+            continue
+          const selection = getRuleSelection(nextCompiled, editor.document)
+          nextManager.prepareProfile(selection.profileId, selection.priorityStyleIds)
+        }
       }
       catch (error) {
+        nextManager?.dispose()
         warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`)
         return
       }
