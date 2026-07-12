@@ -45,12 +45,7 @@ export class DecorationManager {
     }
   }
 
-  apply(
-    editor: TextEditor,
-    rangesByStyle: Map<string, Range[]>,
-    profileId: string,
-    priorityStyleIds: DecorationLayer[],
-  ): void {
+  reserveProfile(editor: TextEditor, profileId: string, priorityStyleIds: DecorationLayer[]): void {
     if (this.disposed)
       return
     const previousProfileId = this.editorProfiles.get(editor)
@@ -64,10 +59,23 @@ export class DecorationManager {
     }
     if (previousProfileId && previousProfileId !== profileId)
       this.detachEditor(editor, previousProfileId)
-
     const profile = this.profiles.get(profileId)!
     profile.editors.add(editor)
     this.editorProfiles.set(editor, profileId)
+    if (!this.activeStyles.has(editor))
+      this.activeStyles.set(editor, new Set())
+  }
+
+  apply(
+    editor: TextEditor,
+    rangesByStyle: Map<string, Range[]>,
+    profileId: string,
+    priorityStyleIds: DecorationLayer[],
+  ): void {
+    if (this.disposed)
+      return
+    this.reserveProfile(editor, profileId, priorityStyleIds)
+    const profile = this.profiles.get(profileId)!
     const previous = this.activeStyles.get(editor) ?? new Set<string>()
     const current = new Set<string>()
     for (const [styleId, ranges] of rangesByStyle) {

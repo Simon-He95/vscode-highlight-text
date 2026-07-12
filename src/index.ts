@@ -171,22 +171,26 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
     ? getRuleLanguageId(document)
     : document.languageId
   const dark = isDarkTheme()
-  const sourceRules = getRulesForLanguage(config, languageId, dark)
+  const warnings: string[] = []
+  const sourceRules = getRulesForLanguage(config, languageId, dark, warnings)
   const priorityStyleIds: Array<{ id: string, styleId: string }> = []
   const rules = sourceRules.flatMap((rule, ruleIndex) => {
-    const targets = rule.targets.flatMap((target, targetIndex) => {
-      if (priorityStyleIds.length >= MAX_PROFILE_LAYERS)
-        return []
+    if (priorityStyleIds.length + rule.targets.length > MAX_PROFILE_LAYERS) {
+      warnings.push(`${rule.context} was omitted because the ${MAX_PROFILE_LAYERS}-layer profile limit was reached`)
+      return []
+    }
+    const targets = rule.targets.map((target, targetIndex) => {
       const decorationId = JSON.stringify([ruleIndex, targetIndex, target.styleId])
       priorityStyleIds.push({ id: decorationId, styleId: target.styleId })
-      return [{ ...target, decorationId }]
+      return { ...target, decorationId }
     })
-    return targets.length ? [{ ...rule, targets }] : []
+    return [{ ...rule, targets }]
   })
   return {
     priorityStyleIds,
     profileId: `${languageId}:${dark ? 'dark' : 'light'}`,
     rules,
+    warnings,
   }
 }
 
@@ -202,7 +206,7 @@ export function activate(context: ExtensionContext): void {
       if (!shouldProcess(editor.document.uri.path) || !editor.visibleRanges.length)
         continue
       const selection = getRuleSelection(compiled, editor.document)
-      candidateManager.prepareProfile(selection.profileId, selection.priorityStyleIds)
+      candidateManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
     }
     manager = candidateManager
   }
@@ -263,7 +267,8 @@ export function activate(context: ExtensionContext): void {
         clearEditor()
       return
     }
-    const { priorityStyleIds, profileId, rules } = getRuleSelection(compiled, document)
+    const { priorityStyleIds, profileId, rules, warnings } = getRuleSelection(compiled, document)
+    warnings.forEach(warnOnce)
     if (!rules.length) {
       if (isCurrent())
         clearEditor()
@@ -515,7 +520,7 @@ export function activate(context: ExtensionContext): void {
           if (!nextFilter(editor.document.uri.path) || !editor.visibleRanges.length)
             continue
           const selection = getRuleSelection(nextCompiled, editor.document)
-          nextManager.prepareProfile(selection.profileId, selection.priorityStyleIds)
+          nextManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
         }
       }
       catch (error) {

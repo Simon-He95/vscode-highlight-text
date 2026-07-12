@@ -382,7 +382,7 @@ export function createExcludeFilter(value: unknown): (path: string) => boolean {
   return createFilter(undefined, excludes)
 }
 
-export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean): CompiledRule[] {
+export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean, warnings?: string[]): CompiledRule[] {
   const aliases: Record<string, string[]> = {
     javascriptreact: ['javascriptreact', 'typescriptreact', 'react'],
     markdown: ['markdown', 'md'],
@@ -392,5 +392,8 @@ export function getRulesForLanguage(config: CompiledConfig, languageId: string, 
   }
   const languages = aliases[languageId] ?? [languageId]
   const mode = dark ? 'dark' : 'light'
-  return [...new Set(languages.flatMap(language => config.languages.get(language)?.[mode] ?? []))].slice(0, MAX_RULES_PER_MODE)
+  const rules = [...new Set(languages.flatMap(language => config.languages.get(language)?.[mode] ?? []))]
+  if (rules.length > MAX_RULES_PER_MODE)
+    warnings?.push(`Rules for ${languageId}.${mode} were limited to ${MAX_RULES_PER_MODE} after alias merging`)
+  return rules.slice(0, MAX_RULES_PER_MODE)
 }

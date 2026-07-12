@@ -96,6 +96,9 @@ describe('regex configuration', () => {
     expect(tsxRules).toHaveLength(1_000)
     expect(jsxRules[0].context).toContain('javascriptreact')
     expect(tsxRules[0].context).toContain('typescriptreact')
+    const aliasWarnings: string[] = []
+    getRulesForLanguage(compiled, 'javascriptreact', false, aliasWarnings)
+    expect(aliasWarnings).toContainEqual(expect.stringContaining('after alias merging'))
     expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many merged rules for vue'))
   })
 
@@ -881,6 +884,16 @@ describe('decoration lifecycle', () => {
       [{ color: 'green' }],
       [{ color: 'red' }],
     ])
+    manager.dispose()
+  })
+
+  it('releases a reserved profile before its first apply', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.reserveProfile(editor, 'reserved', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    manager.clear(editor)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
     manager.dispose()
   })
 

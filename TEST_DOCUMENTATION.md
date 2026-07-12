@@ -22,7 +22,7 @@ The Vitest suite imports production modules directly and covers:
 - initial activation fallback, transactional rule changes, lightweight exclude-only updates, split editors, version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits, duplicate-range removal, and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-interval/cache state, masked-text cache size, cache generations, and reuse of unchanged slice text inside the worker;
-- per-editor executors and language/theme decoration profiles with profile-local priority layers, transactional creation, failed-profile quarantine, split-editor reuse, cleanup, and disposal.
+- per-editor executors and language/theme decoration profiles with profile-local priority layers, editor-owned preflight reservations, atomic layer limits, failed-profile quarantine, split-editor reuse, cleanup, and disposal.
 
 CI additionally:
 

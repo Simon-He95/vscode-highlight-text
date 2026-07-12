@@ -225,6 +225,35 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('releases a preflight profile when the initial scan is oversized', async () => {
+    const editor = createEditor(`foo${'x'.repeat(200_001)}`, 'initial-scan-budget')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Visible scan exceeds 200000 characters')))
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+  })
+
+  it('omits an entire rule when its targets exceed the remaining profile layers', async () => {
+    const patterns = Array.from({ length: 91 }, (_, index) => `pattern-${index}`)
+    configuration.rules = {
+      plaintext: { light: {
+        red: { match: patterns, colors: Array.from({ length: 11 }, (_, index) => `color-${index}`) },
+      } },
+    }
+    const editor = createEditor('nothing', 'layer-limit')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(990)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('profile limit was reached')))
+    disposeContext(context)
+  })
+
   it('does not commit a snapshot when the visible scan exceeds its character budget', async () => {
     const editor = createEditor('foo', 'scan-budget')
     window.visibleTextEditors = [editor] as any
