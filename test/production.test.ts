@@ -28,11 +28,12 @@ afterEach(() => {
 
 describe('regex configuration', () => {
   it('requires nested tuples for flags in the manifest schema', () => {
-    const definitions = packageJson.contributes.configuration.definitions as any
-    const match = definitions['vscode-highlight-text.style'].anyOf[1].properties.match
+    const rulesSchema = packageJson.contributes.configuration.properties['vscode-highlight-text.rules'] as any
+    const serialized = JSON.stringify(rulesSchema)
+    expect(serialized).not.toContain('$ref')
+    const match = rulesSchema.additionalProperties.properties.light.additionalProperties.anyOf[1].properties.match
     expect(match.anyOf[0]).toEqual({ type: 'string' })
-    expect(match.anyOf[1].items.$ref).toBe('#/definitions/vscode-highlight-text.pattern')
-    expect(match.anyOf[0]).not.toHaveProperty('$ref')
+    expect(match.anyOf[1].items.anyOf).toHaveLength(2)
   })
 
   it('normalizes flags and accepts JavaScript assertions and named groups', () => {
@@ -488,6 +489,19 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('does not charge ignored raw matches to the accepted match limit', async () => {
+    const executor = new RegexExecutor(500)
+    const ignored = `BEGIN${'x'.repeat(2_000)}END`
+    await expect(executor.execute({
+      ignores: [{ source: 'BEGIN[\\s\\S]*END', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?= )|TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${ignored}TARGET`,
+    })).resolves.toEqual([{ spans: [[ignored.length, ignored.length + 6]] }])
+    executor.dispose()
+  })
+
   it('enforces the span budget inside the worker', async () => {
     const executor = new RegexExecutor(500)
     await expect(executor.execute({
@@ -826,6 +840,32 @@ describe('decoration lifecycle', () => {
     expect(goodType.dispose).toHaveBeenCalledTimes(1)
     expect(() => manager.prepareProfile('bad', ['bad-a', 'bad-b'])).toThrow('invalid deferred profile')
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(3)
+    manager.dispose()
+  })
+
+  it('keeps identical visual styles separate across priority layers', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['red', { color: 'red' }],
+      ['blue', { color: 'blue' }],
+    ]))
+    const layers = [
+      { id: 'exact-red', styleId: 'red' },
+      { id: 'sibling-blue', styleId: 'blue' },
+      { id: 'generic-red', styleId: 'red' },
+    ]
+    manager.prepareProfile('jsx', layers)
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
+      [{ color: 'red' }],
+      [{ color: 'blue' }],
+      [{ color: 'red' }],
+    ])
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([
+      ['exact-red', [range(0, 1)]],
+      ['sibling-blue', [range(0, 1), range(2, 3)]],
+      ['generic-red', [range(2, 3)]],
+    ]), 'jsx', layers)
+    expect(editor.setDecorations).toHaveBeenCalledTimes(3)
     manager.dispose()
   })
 

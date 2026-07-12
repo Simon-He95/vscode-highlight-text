@@ -15,6 +15,7 @@ const MAX_SCAN_SIZE = 200_000
 const MAX_MATCHES_PER_RULE = 1_000
 const MAX_TOTAL_RANGES = 10_000
 const MAX_TOTAL_SCAN_TIME = 1_000
+const MAX_PROFILE_LAYERS = 1_000
 const REGEX_FAILURE_COOLDOWN = 30_000
 const MAX_REMEMBERED_WARNINGS = 100
 const OVERSCAN_LINES = 20
@@ -87,19 +88,19 @@ function getScanSlices(editor: TextEditor): ScanPlan {
 
   const scanKey = merged.map(range => `${range.start}:${range.end}`).join(',')
   const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
-  const slices = merged.map(({ start, end }) => {
-    const scanStart = Math.max(0, start - 1)
-    const scanEnd = Math.min(documentEnd, end + 1)
-    return {
-      coreStart: start,
-      coreEnd: end,
-      scanStart,
-      text: document.getText(new Range(document.positionAt(scanStart), document.positionAt(scanEnd))),
-    }
-  })
-  const totalSize = slices.reduce((total, slice) => total + slice.text.length, 0)
+  const plannedSlices = merged.map(({ start, end }) => ({
+    coreStart: start,
+    coreEnd: end,
+    scanStart: Math.max(0, start - 1),
+    scanEnd: Math.min(documentEnd, end + 1),
+  }))
+  const totalSize = plannedSlices.reduce((total, slice) => total + slice.scanEnd - slice.scanStart, 0)
   if (totalSize > MAX_SCAN_SIZE)
     return { complete: false, scanKey, slices: [] }
+  const slices = plannedSlices.map(({ scanEnd, ...slice }) => ({
+    ...slice,
+    text: document.getText(new Range(document.positionAt(slice.scanStart), document.positionAt(scanEnd))),
+  }))
   return { complete: true, scanKey, slices }
 }
 
@@ -128,7 +129,7 @@ async function scanRule(
     const start = slice.scanStart + span[0]
     const end = slice.scanStart + span[1]
     return start >= slice.coreStart && end <= slice.coreEnd
-      ? [{ start, end, styleId: rule.targets[index].styleId }]
+      ? [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
       : []
   }))
 }
@@ -170,9 +171,20 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
     ? getRuleLanguageId(document)
     : document.languageId
   const dark = isDarkTheme()
-  const rules = getRulesForLanguage(config, languageId, dark)
+  const sourceRules = getRulesForLanguage(config, languageId, dark)
+  const priorityStyleIds: Array<{ id: string, styleId: string }> = []
+  const rules = sourceRules.flatMap((rule, ruleIndex) => {
+    const targets = rule.targets.flatMap((target, targetIndex) => {
+      if (priorityStyleIds.length >= MAX_PROFILE_LAYERS)
+        return []
+      const decorationId = JSON.stringify([ruleIndex, targetIndex, target.styleId])
+      priorityStyleIds.push({ id: decorationId, styleId: target.styleId })
+      return [{ ...target, decorationId }]
+    })
+    return targets.length ? [{ ...rule, targets }] : []
+  })
   return {
-    priorityStyleIds: [...new Set(rules.flatMap(rule => rule.targets.map(target => target.styleId)))],
+    priorityStyleIds,
     profileId: `${languageId}:${dark ? 'dark' : 'light'}`,
     rules,
   }
@@ -289,6 +301,8 @@ export function activate(context: ExtensionContext): void {
         budgetExceeded = true
         break
       }
+      if (budget.exhausted)
+        break
       if (failures.isDisabled(document, rule.id)) {
         failedRuleIds.add(rule.id)
         continue

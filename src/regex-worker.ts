@@ -193,7 +193,8 @@ parentPort.on('message', ({ id, request }) => {
     const maxSpans = request.maxSpans ?? 10000
     let spanCount = 0
     const results = []
-    const collected = collect(regex, hasIgnores ? maskedText : text, request.maxMatches, (match) => {
+    const rawMatchLimit = Math.max(request.maxMatches * 10, 10000)
+    const collected = collect(regex, hasIgnores ? maskedText : text, rawMatchLimit, (match) => {
       const fullSpan = match.indices && match.indices[0]
       if (!fullSpan)
         return
@@ -216,12 +217,17 @@ parentPort.on('message', ({ id, request }) => {
         throw error
       }
       if (validSpanCount) {
+        if (results.length >= request.maxMatches) {
+          const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
+          error.code = 'MATCH_LIMIT'
+          throw error
+        }
         spanCount += validSpanCount
         results.push({ spans })
       }
     })
     if (collected.truncated) {
-      const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
+      const error = new Error('Main pattern exceeded ' + rawMatchLimit + ' raw matches')
       error.code = 'MATCH_LIMIT'
       throw error
     }

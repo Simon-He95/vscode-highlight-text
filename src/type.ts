@@ -16,6 +16,7 @@ export interface CompiledPattern {
 }
 
 export interface CompiledTarget {
+  decorationId?: string
   groupIndex?: number
   styleId: string
 }

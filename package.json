@@ -64,10 +64,218 @@
             "type": "object",
             "properties": {
               "light": {
-                "$ref": "#/definitions/vscode-highlight-text.styles"
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "string"
+                              }
+                            ],
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "match"
+                      ],
+                      "properties": {
+                        "match": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "array",
+                              "items": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "array",
+                                    "items": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "string"
+                                      }
+                                    ],
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                  }
+                                ]
+                              }
+                            }
+                          ]
+                        },
+                        "colors": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "matchCss": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "ignoreReg": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "array",
+                                "items": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "string"
+                                  }
+                                ],
+                                "minItems": 2,
+                                "maxItems": 2
+                              }
+                            ]
+                          }
+                        },
+                        "background": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  ]
+                }
               },
               "dark": {
-                "$ref": "#/definitions/vscode-highlight-text.styles"
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "string"
+                              }
+                            ],
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "match"
+                      ],
+                      "properties": {
+                        "match": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "array",
+                              "items": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "array",
+                                    "items": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "string"
+                                      }
+                                    ],
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                  }
+                                ]
+                              }
+                            }
+                          ]
+                        },
+                        "colors": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "matchCss": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "ignoreReg": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "array",
+                                "items": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "string"
+                                  }
+                                ],
+                                "minItems": 2,
+                                "maxItems": 2
+                              }
+                            ]
+                          }
+                        },
+                        "background": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  ]
+                }
               }
             },
             "additionalProperties": false
@@ -82,87 +290,6 @@
           "description": "Directories to be skipped.",
           "items": {
             "type": "string"
-          }
-        }
-      },
-      "definitions": {
-        "vscode-highlight-text.pattern": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "string"
-                }
-              ],
-              "minItems": 2,
-              "maxItems": 2
-            }
-          ]
-        },
-        "vscode-highlight-text.style": {
-          "anyOf": [
-            {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/vscode-highlight-text.pattern"
-              }
-            },
-            {
-              "type": "object",
-              "required": [
-                "match"
-              ],
-              "properties": {
-                "match": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/definitions/vscode-highlight-text.pattern"
-                      }
-                    }
-                  ]
-                },
-                "colors": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "matchCss": {
-                  "type": "array",
-                  "items": {
-                    "type": "object"
-                  }
-                },
-                "ignoreReg": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/definitions/vscode-highlight-text.pattern"
-                  }
-                },
-                "background": {
-                  "type": "string"
-                }
-              },
-              "additionalProperties": true
-            }
-          ]
-        },
-        "vscode-highlight-text.styles": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/definitions/vscode-highlight-text.style"
           }
         }
       }

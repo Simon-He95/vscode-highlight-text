@@ -233,10 +233,12 @@ describe('extension activation orchestration', () => {
     activate(context)
     await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
     editor.setDecorations.mockClear()
+    editor.document.getText.mockClear()
     editor.setText(`foo${'x'.repeat(200_001)}`)
     await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Visible scan exceeds 200000 characters')))
     expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
+    expect(editor.document.getText).not.toHaveBeenCalled()
     disposeContext(context)
   })
 
@@ -327,9 +329,11 @@ describe('extension activation orchestration', () => {
 
     activate(context)
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Main pattern exceeded 1000 matches')))
-    const types = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
-    const redType = types.find(type => type.options.color === 'red')
-    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(redType, expect.arrayContaining([expect.anything()])))
+    const redTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).filter(type => type.options.color === 'red')
+    expect(redTypes).toHaveLength(2)
+    await waitFor(() => expect(redTypes.some(type => editor.setDecorations.mock.calls.some(
+      ([appliedType, ranges]) => appliedType === type && ranges.length > 0,
+    ))).toBe(true))
 
     disposeContext(context)
   })

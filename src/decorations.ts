@@ -1,6 +1,8 @@
 import type { DecorationRenderOptions, Range, TextEditor, TextEditorDecorationType } from 'vscode'
 import { window } from 'vscode'
 
+type DecorationLayer = string | { id: string, styleId: string }
+
 interface DecorationProfile {
   editors: Set<TextEditor>
   types: Map<string, TextEditorDecorationType>
@@ -15,7 +17,7 @@ export class DecorationManager {
 
   constructor(private readonly styles: Map<string, DecorationRenderOptions>) {}
 
-  prepareProfile(profileId: string, priorityStyleIds: string[]): void {
+  prepareProfile(profileId: string, priorityStyleIds: DecorationLayer[]): void {
     if (this.disposed || this.profiles.has(profileId))
       return
     const previousError = this.failedProfiles.get(profileId)
@@ -23,10 +25,15 @@ export class DecorationManager {
       throw previousError
     const types = new Map<string, TextEditorDecorationType>()
     try {
-      for (const styleId of new Set(priorityStyleIds)) {
+      const seen = new Set<string>()
+      for (const layer of priorityStyleIds) {
+        const { id, styleId } = typeof layer === 'string' ? { id: layer, styleId: layer } : layer
+        if (seen.has(id))
+          continue
+        seen.add(id)
         const options = this.styles.get(styleId)
         if (options)
-          types.set(styleId, window.createTextEditorDecorationType(options))
+          types.set(id, window.createTextEditorDecorationType(options))
       }
       this.profiles.set(profileId, { editors: new Set(), types })
     }
@@ -42,7 +49,7 @@ export class DecorationManager {
     editor: TextEditor,
     rangesByStyle: Map<string, Range[]>,
     profileId: string,
-    priorityStyleIds: string[],
+    priorityStyleIds: DecorationLayer[],
   ): void {
     if (this.disposed)
       return
