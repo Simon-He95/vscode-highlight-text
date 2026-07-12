@@ -74,12 +74,12 @@ jobs:
           executor.execute({
             ignores: [],
             maxMatches: 10,
-            pattern: { source: '(?=.)', flags: 'gdu' },
-            targetGroups: [0],
+            pattern: { source: '(?=(.))', flags: 'gdu' },
+            targetGroups: [1],
             text: '😀a',
           }).then((results) => {
             executor.dispose()
-            if (JSON.stringify(results) !== JSON.stringify([{ spans: [[0, 0]] }, { spans: [[2, 2]] }]))
+            if (JSON.stringify(results) !== JSON.stringify([{ spans: [[0, 2]] }, { spans: [[2, 3]] }]))
               process.exit(1)
           }).catch(() => process.exit(1))
           NODE
