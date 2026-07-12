@@ -221,6 +221,13 @@ describe('regex configuration', () => {
     expect(new Set(ids).size).toBe(2)
   })
 
+  it('supports language IDs that match object prototype names', () => {
+    const compiled = compileConfig({ constructor: { light: { red: ['foo'] } } })
+    for (const languageId of ['constructor', 'toString', '__proto__'])
+      expect(() => getRulesForLanguage(compiled, languageId, false)).not.toThrow()
+    expect(getRulesForLanguage(compiled, 'constructor', false)).toHaveLength(1)
+  })
+
   it('preserves React aliases across JSX and TSX', () => {
     const compiled = compileConfig({
       react: { light: { red: ['react-rule'] } },
@@ -607,6 +614,39 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('waits for worker termination before starting the next job', async () => {
+    let releaseTermination!: () => void
+    let attempts = 0
+    const executor = new RegexExecutor(10, () => {
+      attempts++
+      if (attempts > 1) {
+        const recovered = new EventEmitter() as any
+        recovered.off = recovered.removeListener.bind(recovered)
+        recovered.unref = vi.fn()
+        recovered.terminate = vi.fn(async () => 0)
+        recovered.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => recovered.emit('message', { id, results: [{ spans: [[0, 1]] }] })))
+        return recovered
+      }
+      const worker = new EventEmitter() as any
+      worker.off = worker.removeListener.bind(worker)
+      worker.unref = vi.fn()
+      worker.postMessage = vi.fn()
+      worker.terminate = vi.fn(() => new Promise<number>((resolve) => {
+        releaseTermination = () => resolve(0)
+      }))
+      return worker
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request)).rejects.toThrow('exceeded 10ms')
+    const next = executor.execute(request)
+    await Promise.resolve()
+    expect(attempts).toBe(1)
+    releaseTermination()
+    await expect(next).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(attempts).toBe(2)
+    executor.dispose()
+  })
+
   it('rejects queued jobs without recreating workers during infrastructure cooldown', async () => {
     let now = 0
     vi.spyOn(Date, 'now').mockImplementation(() => now)
@@ -909,6 +949,15 @@ describe('decoration lifecycle', () => {
     expect(type.dispose).not.toHaveBeenCalled()
     manager.clear(second)
     expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('enforces a manager-wide decoration type budget', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    manager.prepareProfile('first', Array.from({ length: 1_000 }, (_, index) => ({ id: `a-${index}`, styleId: 'a' })))
+    expect(() => manager.prepareProfile('second', Array.from({ length: 501 }, (_, index) => ({ id: `b-${index}`, styleId: 'a' }))))
+      .toThrow('Decoration type budget exceeded')
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1_000)
     manager.dispose()
   })
 

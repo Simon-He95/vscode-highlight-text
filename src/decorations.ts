@@ -1,6 +1,10 @@
 import type { DecorationRenderOptions, Range, TextEditor, TextEditorDecorationType } from 'vscode'
 import { window } from 'vscode'
 
+const MAX_MANAGER_DECORATION_TYPES = 1_500
+let globallyAllocatedDecorationTypes = 0
+const MAX_TRANSITION_DECORATION_TYPES = MAX_MANAGER_DECORATION_TYPES * 2
+
 type DecorationLayer = string | { id: string, styleId: string }
 
 interface DecorationProfile {
@@ -14,6 +18,7 @@ export class DecorationManager {
   private readonly failedProfiles = new Map<string, Error>()
   private readonly editorProfiles = new WeakMap<TextEditor, string>()
   private readonly profiles = new Map<string, DecorationProfile>()
+  private typeCount = 0
 
   constructor(private readonly styles: Map<string, DecorationRenderOptions>) {}
 
@@ -23,18 +28,24 @@ export class DecorationManager {
     const previousError = this.failedProfiles.get(profileId)
     if (previousError)
       throw previousError
+    const layers = [...new Map(priorityStyleIds.map((layer) => {
+      const normalized = typeof layer === 'string' ? { id: layer, styleId: layer } : layer
+      return [normalized.id, normalized]
+    })).values()].filter(layer => this.styles.has(layer.styleId))
+    if (
+      this.typeCount + layers.length > MAX_MANAGER_DECORATION_TYPES
+      || globallyAllocatedDecorationTypes + layers.length > MAX_TRANSITION_DECORATION_TYPES
+    ) {
+      const error = new Error(`Decoration type budget exceeded: at most ${MAX_MANAGER_DECORATION_TYPES} active types are allowed`)
+      this.failedProfiles.set(profileId, error)
+      throw error
+    }
     const types = new Map<string, TextEditorDecorationType>()
     try {
-      const seen = new Set<string>()
-      for (const layer of priorityStyleIds) {
-        const { id, styleId } = typeof layer === 'string' ? { id: layer, styleId: layer } : layer
-        if (seen.has(id))
-          continue
-        seen.add(id)
-        const options = this.styles.get(styleId)
-        if (options)
-          types.set(id, window.createTextEditorDecorationType(options))
-      }
+      for (const { id, styleId } of layers)
+        types.set(id, window.createTextEditorDecorationType(this.styles.get(styleId)!))
+      this.typeCount += types.size
+      globallyAllocatedDecorationTypes += types.size
       this.profiles.set(profileId, { editors: new Set(), types })
     }
     catch (error) {
@@ -109,7 +120,7 @@ export class DecorationManager {
         for (const styleId of this.activeStyles.get(editor) ?? [])
           this.clearStyle(editor, profile, styleId)
       }
-      this.disposeTypes(profile.types)
+      this.disposeProfile(profile)
     }
     this.profiles.clear()
   }
@@ -124,7 +135,7 @@ export class DecorationManager {
     this.editorProfiles.delete(editor)
     profile.editors.delete(editor)
     if (!profile.editors.size) {
-      this.disposeTypes(profile.types)
+      this.disposeProfile(profile)
       this.profiles.delete(profileId)
     }
   }
@@ -139,6 +150,12 @@ export class DecorationManager {
     catch {
       // Continue cleanup for the remaining editors and decoration types.
     }
+  }
+
+  private disposeProfile(profile: DecorationProfile): void {
+    this.typeCount -= profile.types.size
+    globallyAllocatedDecorationTypes -= profile.types.size
+    this.disposeTypes(profile.types)
   }
 
   private disposeTypes(types: Map<string, TextEditorDecorationType>): void {

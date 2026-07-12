@@ -13,6 +13,13 @@ const MAX_TOTAL_RULES = 5000
 const MAX_TOTAL_STYLES = 1000
 const MAX_WARNINGS = 100
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
+const LANGUAGE_ALIASES = new Map<string, readonly string[]>([
+  ['javascriptreact', ['javascriptreact', 'typescriptreact', 'react']],
+  ['markdown', ['markdown', 'md']],
+  ['plaintext', ['plaintext', 'txt']],
+  ['typescriptreact', ['typescriptreact', 'javascriptreact', 'react']],
+  ['vuetsx', ['vuetsx', 'vue']],
+])
 
 interface CompilationBudget {
   remainingInputs: number
@@ -383,14 +390,7 @@ export function createExcludeFilter(value: unknown): (path: string) => boolean {
 }
 
 export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean, warnings?: string[]): CompiledRule[] {
-  const aliases: Record<string, string[]> = {
-    javascriptreact: ['javascriptreact', 'typescriptreact', 'react'],
-    markdown: ['markdown', 'md'],
-    plaintext: ['plaintext', 'txt'],
-    typescriptreact: ['typescriptreact', 'javascriptreact', 'react'],
-    vuetsx: ['vuetsx', 'vue'],
-  }
-  const languages = aliases[languageId] ?? [languageId]
+  const languages = LANGUAGE_ALIASES.get(languageId) ?? [languageId]
   const mode = dark ? 'dark' : 'light'
   const rules = [...new Set(languages.flatMap(language => config.languages.get(language)?.[mode] ?? []))]
   if (rules.length > MAX_RULES_PER_MODE)

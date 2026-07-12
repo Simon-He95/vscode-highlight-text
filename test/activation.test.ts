@@ -420,6 +420,12 @@ describe('extension activation orchestration', () => {
       expect(timeoutWarnings).toHaveLength(2)
     }, 3_000)
     expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
+    await waitFor(() => {
+      const greenTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).filter(type => type.options.color === 'green')
+      expect(greenTypes.some(type => editor.setDecorations.mock.calls.some(
+        ([appliedType, ranges]) => appliedType === type && ranges.length > 0,
+      ))).toBe(true)
+    }, 3_000)
 
     disposeContext(context)
   })

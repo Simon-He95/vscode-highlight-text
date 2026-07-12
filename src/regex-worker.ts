@@ -308,6 +308,7 @@ export class RegexExecutor {
   private infrastructureBlockedUntil = 0
   private nextId = 0
   private readonly pending: PendingJob[] = []
+  private terminating?: Promise<void>
   private worker?: WorkerType
   private workerText?: string
 
@@ -398,6 +399,10 @@ export class RegexExecutor {
   private drain(): void {
     if (this.disposed || this.active)
       return
+    if (this.terminating) {
+      void this.terminating.finally(() => this.drain())
+      return
+    }
     if (Date.now() < this.infrastructureBlockedUntil) {
       const error = new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable')
       for (const job of this.pending.splice(0)) {
@@ -465,7 +470,20 @@ export class RegexExecutor {
           this.worker = undefined
           this.workerText = undefined
         }
-        void worker.terminate()
+        const termination = Promise.resolve().then(async () => {
+          await worker.terminate()
+        }).catch(() => {})
+        this.terminating = termination
+        if (error)
+          job.reject(error)
+        else
+          job.resolve(results ?? [])
+        void termination.finally(() => {
+          if (this.terminating === termination)
+            this.terminating = undefined
+          this.drain()
+        })
+        return
       }
       if (error)
         job.reject(error)

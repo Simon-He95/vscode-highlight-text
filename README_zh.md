@@ -229,6 +229,12 @@
    "red": [["[0-9]+", "gm"]]
    ```
 
+## 性能与限制
+
+为保持 VS Code Extension Host 响应流畅，高亮处理设有明确边界：单次可见扫描最多 200,000 个 UTF-16 单元、每条规则最多 1,000 个有效匹配、完整刷新最多保留 10,000 个 ranges、每个扫描分片最多 1,000ms、每个 worker 任务最多 500ms、失败规则冷却 30 秒、每个 profile 最多 1,000 个 layers、每个活动 manager 最多 1,500 个 decoration types。扫描时间预算耗尽后，会从下一条未处理规则自动继续。扩展使用一个共享正则 worker，因此多个可见编辑器不会并发运行正则 worker。
+
+React aliases 的重叠优先级是确定的：精确语言（`javascriptreact` 或 `typescriptreact`）高于 sibling alias，sibling alias 高于通用 `react`。达到限制或配置无效时，会通过 VS Code 警告消息提示。
+
 ## Show your style
 
 - 你可以在[这里](https://github.com/Simon-He95/vscode-highlight-text/issues/5)去分享你觉得很炫酷的风格,也可以提 pr 作为内置的模板风格选择提供给更多人使用.

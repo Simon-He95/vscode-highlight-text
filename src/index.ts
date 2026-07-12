@@ -47,6 +47,18 @@ interface RuleSnapshot {
   rangesByStyle: Map<string, VscodeRange[]>
 }
 
+interface ScanSession {
+  acceptedRangeKeys: Set<string>
+  candidateKeys: Set<string>
+  candidateSnapshot: Map<string, VscodeRange[]>
+  failedRuleIds: Set<string>
+  key: string
+  nextRuleIndex: number
+  nextSliceIndex: number
+  previousSnapshots: Map<string, RuleSnapshot>
+  scannedSnapshots: Map<string, Map<string, VscodeRange[]>>
+}
+
 interface ScanPlan {
   complete: boolean
   scanKey: string
@@ -217,15 +229,9 @@ export function activate(context: ExtensionContext): void {
     manager = new DecorationManager(new Map())
   }
   let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
-  const executors = new Map<TextEditor, RegexExecutor>()
-  const getExecutor = (editor: TextEditor) => {
-    const existing = executors.get(editor)
-    if (existing)
-      return existing
-    const executor = new RegexExecutor()
-    executors.set(editor, executor)
-    return executor
-  }
+  let scanSessions = new WeakMap<TextEditor, ScanSession>()
+  const executor = new RegexExecutor()
+  const getExecutor = (_editor: TextEditor) => executor
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
   const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
   let warningToastCount = 0
@@ -242,6 +248,8 @@ export function activate(context: ExtensionContext): void {
   if (initialManagerError)
     warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`)
 
+  let scheduleContinuation = (_editor: TextEditor) => {}
+
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
     const documentVersion = document.version
@@ -257,9 +265,8 @@ export function activate(context: ExtensionContext): void {
     if (!isCurrent())
       return
     const clearEditor = () => {
-      executors.get(editor)?.dispose()
-      executors.delete(editor)
       ruleSnapshots.delete(editor)
+      scanSessions.delete(editor)
       manager.clear(editor)
     }
     if (!shouldProcess(document.uri.path) || !editor.visibleRanges.length) {
@@ -292,39 +299,58 @@ export function activate(context: ExtensionContext): void {
       return
     }
 
-    const scannedSnapshots = new Map<string, Map<string, VscodeRange[]>>()
-    const acceptedRangeKeys = new Set<string>()
-    const failedRuleIds = new Set<string>()
-    const executor = getExecutor(editor)
+    const sessionKey = JSON.stringify([documentVersion, scanPlan.scanKey, profileId])
+    let session = scanSessions.get(editor)
+    if (!session || session.key !== sessionKey) {
+      session = {
+        acceptedRangeKeys: new Set(),
+        candidateKeys: new Set(),
+        candidateSnapshot: new Map(),
+        failedRuleIds: new Set(),
+        key: sessionKey,
+        nextRuleIndex: 0,
+        nextSliceIndex: 0,
+        previousSnapshots,
+        scannedSnapshots: new Map(),
+      }
+      scanSessions.set(editor, session)
+    }
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
-    let budgetExceeded = false
+    for (let index = 0; index < session.acceptedRangeKeys.size; index++)
+      budget.consumeRange()
+    const executor = getExecutor(editor)
     let infrastructureFailed = false
-    for (const rule of rules) {
+    let needsContinuation = false
+
+    while (session.nextRuleIndex < rules.length) {
       if (!isCurrent())
         return
       if (budget.timeExceeded) {
-        budgetExceeded = true
+        needsContinuation = true
         break
       }
-      if (budget.exhausted)
+      if (budget.exhausted) {
+        session.nextRuleIndex = rules.length
         break
+      }
+      const rule = rules[session.nextRuleIndex]
       if (failures.isDisabled(document, rule.id)) {
-        failedRuleIds.add(rule.id)
+        session.failedRuleIds.add(rule.id)
+        session.nextRuleIndex++
+        session.nextSliceIndex = 0
         continue
       }
 
-      const candidateSnapshot = new Map<string, VscodeRange[]>()
-      const candidateKeys = new Set<string>()
       let candidateExceeded = false
       let ruleFailed = false
-      for (const slice of scanPlan.slices) {
+      while (session.nextSliceIndex < scanPlan.slices.length) {
         if (!isCurrent())
           return
         if (budget.timeExceeded) {
-          budgetExceeded = true
-          ruleFailed = true
+          needsContinuation = true
           break
         }
+        const slice = scanPlan.slices[session.nextSliceIndex]
         try {
           const matches = await scanRule(
             executor,
@@ -339,17 +365,18 @@ export function activate(context: ExtensionContext): void {
             return
           for (const match of matches) {
             const rangeKey = `${match.styleId}:${match.start}-${match.end}`
-            if (candidateKeys.has(rangeKey))
+            if (session.candidateKeys.has(rangeKey))
               continue
-            if (candidateKeys.size >= MAX_TOTAL_RANGES) {
+            if (session.candidateKeys.size >= MAX_TOTAL_RANGES) {
               candidateExceeded = true
               break
             }
-            candidateKeys.add(rangeKey)
-            const ranges = candidateSnapshot.get(match.styleId) ?? []
+            session.candidateKeys.add(rangeKey)
+            const ranges = session.candidateSnapshot.get(match.styleId) ?? []
             ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
-            candidateSnapshot.set(match.styleId, ranges)
+            session.candidateSnapshot.set(match.styleId, ranges)
           }
+          session.nextSliceIndex++
         }
         catch (error) {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
@@ -361,17 +388,17 @@ export function activate(context: ExtensionContext): void {
             warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`)
           }
           else if (isRegexExecutionTimeoutError(error)) {
-            failedRuleIds.add(rule.id)
+            session.failedRuleIds.add(rule.id)
             failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
           }
           else if (isRegexExecutionLimitError(error)) {
-            failedRuleIds.add(rule.id)
+            session.failedRuleIds.add(rule.id)
             failures.recordFailure(document, rule.id)
             warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {
-            failedRuleIds.add(rule.id)
+            session.failedRuleIds.add(rule.id)
             warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
           }
           break
@@ -379,40 +406,51 @@ export function activate(context: ExtensionContext): void {
         if (candidateExceeded)
           break
       }
-      if (infrastructureFailed || budgetExceeded)
+      if (needsContinuation || infrastructureFailed)
         break
-      if (ruleFailed)
+      if (!ruleFailed && !candidateExceeded && session.nextSliceIndex < scanPlan.slices.length)
         continue
-      if (candidateExceeded) {
-        scannedSnapshots.set(rule.id, new Map())
-        warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: it exceeds ${MAX_TOTAL_RANGES} unique ranges`)
-        continue
+      if (!ruleFailed) {
+        if (candidateExceeded) {
+          session.scannedSnapshots.set(rule.id, new Map())
+          warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: it exceeds ${MAX_TOTAL_RANGES} unique ranges`)
+        }
+        else {
+          const newKeys = [...session.candidateKeys].filter(key => !session.acceptedRangeKeys.has(key))
+          if (newKeys.length > budget.remainingRanges) {
+            session.scannedSnapshots.set(rule.id, new Map())
+            warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: ${newKeys.length} ranges exceed the remaining refresh budget`)
+          }
+          else {
+            for (const key of newKeys) {
+              budget.consumeRange()
+              session.acceptedRangeKeys.add(key)
+            }
+            session.scannedSnapshots.set(rule.id, session.candidateSnapshot)
+          }
+        }
       }
-
-      const newKeys = [...candidateKeys].filter(key => !acceptedRangeKeys.has(key))
-      if (newKeys.length > budget.remainingRanges) {
-        scannedSnapshots.set(rule.id, new Map())
-        warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: ${newKeys.length} ranges exceed the remaining refresh budget`)
-        continue
-      }
-      for (const key of newKeys) {
-        budget.consumeRange()
-        acceptedRangeKeys.add(key)
-      }
-      scannedSnapshots.set(rule.id, candidateSnapshot)
+      session.candidateKeys = new Set()
+      session.candidateSnapshot = new Map()
+      session.nextSliceIndex = 0
+      session.nextRuleIndex++
     }
 
     if (infrastructureFailed) {
+      scanSessions.delete(editor)
       clearStaleSnapshot()
       return
     }
-    if (budget.timeExceeded)
-      budgetExceeded = true
-    if (budgetExceeded) {
+    if (needsContinuation) {
       clearStaleSnapshot()
-      warnOnce(`Highlight refresh budget reached in ${document.uri.fsPath}; stale highlights were cleared when necessary`)
+      queueMicrotask(() => {
+        if (isCurrent())
+          scheduleContinuation(editor)
+      })
       return
     }
+    scanSessions.delete(editor)
+    const { failedRuleIds, scannedSnapshots } = session
     if (isCurrent()) {
       const nextSnapshots = new Map<string, RuleSnapshot>()
       for (const rule of rules) {
@@ -443,15 +481,15 @@ export function activate(context: ExtensionContext): void {
     UPDATE_DELAY,
     error => warnOnce(error instanceof Error ? error.message : String(error)),
   )
+  scheduleContinuation = editor => scheduler.schedule(editor, true)
 
   const refreshVisibleEditors = (immediate = true) => {
     const visible = new Set(window.visibleTextEditors)
     for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
         scheduler.remove(editor)
-        executors.get(editor)?.dispose()
-        executors.delete(editor)
         ruleSnapshots.delete(editor)
+        scanSessions.delete(editor)
         manager.clear(editor)
       }
     }
@@ -479,8 +517,6 @@ export function activate(context: ExtensionContext): void {
       for (const editor of window.visibleTextEditors) {
         if (editor.document === document) {
           scheduler.invalidate(editor)
-          executors.get(editor)?.dispose()
-          executors.delete(editor)
           ruleSnapshots.delete(editor)
           manager.clear(editor)
         }
@@ -534,8 +570,9 @@ export function activate(context: ExtensionContext): void {
       compiled = nextCompiled
       shouldProcess = nextFilter
       ruleSnapshots = new WeakMap()
+      scanSessions = new WeakMap()
       failures.clear()
-      executors.forEach(executor => executor.resetCache())
+      executor.resetCache()
       warned.clear()
       warningToastCount = 0
       compiled.warnings.forEach(warnOnce)
@@ -554,8 +591,7 @@ export function activate(context: ExtensionContext): void {
       dispose: () => {
         disposed = true
         scheduler.dispose()
-        executors.forEach(executor => executor.dispose())
-        executors.clear()
+        executor.dispose()
         manager.dispose()
       },
     },
