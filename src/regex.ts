@@ -83,29 +83,44 @@ export function isRegexSafe(regex: RegExp): boolean {
     }
     if (character === ')') {
       const group = groups.pop()
-      if (group?.hasQuantifier && isQuantifierAt(source, index + 1))
+      if (group?.hasQuantifier && quantifierEnd(source, index + 1) !== undefined)
         return false
+      if (group?.hasQuantifier && groups.length)
+        groups[groups.length - 1].hasQuantifier = true
       continue
     }
-    if (isQuantifierAt(source, index) && !(character === '?' && source[index - 1] === '(')) {
-      groups.forEach(group => group.hasQuantifier = true)
-      if (character === '{') {
-        const end = source.indexOf('}', index + 1)
-        if (end >= 0)
-          index = end
-      }
+    const end = quantifierEnd(source, index)
+    if (end !== undefined && !(character === '?' && source[index - 1] === '(')) {
+      const group = groups.at(-1)
+      if (group)
+        group.hasQuantifier = true
+      index = end
     }
   }
   return true
 }
 
-function isQuantifierAt(source: string, index: number): boolean {
+function quantifierEnd(source: string, index: number): number | undefined {
   const character = source[index]
   if (character === '*' || character === '+' || character === '?')
-    return true
-  if (character !== '{')
-    return false
-  return /^\{\d+(?:,\d*)?\}/.test(source.slice(index))
+    return index
+  if (character !== '{' || !isDigit(source[index + 1]))
+    return
+  let cursor = index + 2
+  while (isDigit(source[cursor]))
+    cursor++
+  if (source[cursor] === '}')
+    return cursor
+  if (source[cursor] !== ',')
+    return
+  cursor++
+  while (isDigit(source[cursor]))
+    cursor++
+  return source[cursor] === '}' ? cursor : undefined
+}
+
+function isDigit(character: string | undefined): boolean {
+  return character !== undefined && character >= '0' && character <= '9'
 }
 
 export function advanceStringIndex(text: string, index: number, unicode: boolean): number {

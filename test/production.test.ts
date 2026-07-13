@@ -61,6 +61,8 @@ describe('regex configuration', () => {
     const nestedPlus = '(a+)+$'
     expect(isRegexSafe(new RegExp(nestedPlus))).toBe(false)
     expect(isRegexSafe(/(?!test)/)).toBe(true)
+    expect(isRegexSafe(/((a+)b)+/)).toBe(false)
+    expect(isRegexSafe(/(ab)+/)).toBe(true)
     expect(() => compilePattern([nestedPlus, 'm'])).not.toThrow()
 
     const compiled = compileConfig({ vue: { light: {
@@ -165,6 +167,16 @@ describe('regex configuration', () => {
     expect(getRulesForLanguage(compiled, 'plaintext', false)).toEqual([])
     expect(compiled.styles).toHaveLength(0)
     expect(compiled.warnings).toContainEqual(expect.stringContaining('Style exceeds the complexity limit'))
+  })
+
+  it('normalizes styles into null-prototype objects without __proto__ mutation', () => {
+    const raw = Object.create(null) as Record<string, unknown>
+    raw.color = 'red'
+    Object.defineProperty(raw, '__proto__', { enumerable: true, value: { before: { contentText: 'unsafe' } } })
+    const style = normalizeStyle(raw) as Record<string, unknown>
+    expect(Object.getPrototypeOf(style)).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(style, '__proto__')).toBe(true)
+    expect(style.color).toBe('red')
   })
 
   it('bounds top-level style copying, key size, and matchCss styles', () => {

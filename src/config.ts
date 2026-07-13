@@ -116,7 +116,7 @@ function validateStyleComplexity(style: Record<string, unknown>): void {
 }
 
 export function normalizeStyle(...sources: Record<string, unknown>[]): DecorationRenderOptions {
-  const style: Record<string, unknown> = {}
+  const style = Object.create(null) as Record<string, unknown>
   let copiedProperties = 0
   let copiedKeyUnits = 0
   let background: unknown

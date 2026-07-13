@@ -7,7 +7,7 @@ import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vs
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
 import { isRegexExecutionAbortedError, isRegexExecutionBudgetError, isRegexExecutionInfrastructureError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
-import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
+import { aggregateSnapshots, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
 
@@ -302,13 +302,24 @@ export function activate(context: ExtensionContext): void {
   const executor = new RegexExecutor()
   const getExecutor = (_editor: TextEditor) => executor
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
-  const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
+  const importantWarned = new Set<string>()
+  const warned = new Set<string>()
+  let additionalWarningsSuppressed = false
   let importantToastCount = 0
   let warningToastCount = 0
 
   const warnOnce = (warning: string, important = false) => {
-    if (disposed || !warned.add(warning))
+    const registry = important ? importantWarned : warned
+    if (disposed || registry.has(warning))
       return
+    if (registry.size >= MAX_REMEMBERED_WARNINGS) {
+      if (!important && !additionalWarningsSuppressed) {
+        output.appendLine(`[${new Date().toISOString()}] Additional warnings have been suppressed`)
+        additionalWarningsSuppressed = true
+      }
+      return
+    }
+    registry.add(warning)
     output.appendLine(`[${new Date().toISOString()}] ${warning}`)
     if (important ? importantToastCount >= 5 : warningToastCount >= 5)
       return
@@ -406,6 +417,30 @@ export function activate(context: ExtensionContext): void {
     const budget = new RefreshBudget(MAX_TOTAL_RANGES, Number.POSITIVE_INFINITY)
     for (let index = 0; index < session.acceptedRangeKeys.size; index++)
       budget.consumeRange()
+    const acceptPreviousSnapshot = (ruleId: string) => {
+      const previous = previousSnapshots.get(ruleId)
+      if (previous?.documentVersion !== documentVersion || previous.scanKey !== scanPlan.scanKey)
+        return
+      const newKeys = new Set<string>()
+      for (const [styleId, ranges] of previous.rangesByStyle) {
+        for (const range of ranges) {
+          const start = document.offsetAt(range.start)
+          const end = document.offsetAt(range.end)
+          const key = `${styleId}:${start}-${end}`
+          if (!session.acceptedRangeKeys.has(key))
+            newKeys.add(key)
+        }
+      }
+      if (newKeys.size > budget.remainingRanges) {
+        previousSnapshots.delete(ruleId)
+        warnOnce(`Previous highlight snapshot was discarded in ${document.uri.fsPath}: ${newKeys.size} ranges exceed the remaining refresh budget`)
+        return
+      }
+      for (const key of newKeys) {
+        budget.consumeRange()
+        session.acceptedRangeKeys.add(key)
+      }
+    }
     const executor = getExecutor(editor)
     let infrastructureFailed = false
     let infrastructureRetryAfterMs = 5_000
@@ -424,8 +459,10 @@ export function activate(context: ExtensionContext): void {
       }
       if (budget.exhausted) {
         const skipped = rules.length - session.nextRuleIndex
-        for (let index = session.nextRuleIndex; index < rules.length; index++)
+        for (let index = session.nextRuleIndex; index < rules.length; index++) {
           session.failedRuleIds.add(rules[index].id)
+          acceptPreviousSnapshot(rules[index].id)
+        }
         session.nextRuleIndex = rules.length
         warnOnce(`Highlight range budget was exhausted in ${document.uri.fsPath}; ${skipped} remaining rules were skipped`, true)
         break
@@ -433,6 +470,7 @@ export function activate(context: ExtensionContext): void {
       const rule = rules[session.nextRuleIndex]
       if (failures.isDisabled(document, rule.id) || structuralFailure.ruleIds.has(rule.id)) {
         session.failedRuleIds.add(rule.id)
+        acceptPreviousSnapshot(rule.id)
         session.nextRuleIndex++
         session.nextSliceIndex = 0
         continue
@@ -483,7 +521,7 @@ export function activate(context: ExtensionContext): void {
           chunkJobCount++
           for (const match of scanResult.ranges) {
             const rangeKey = `${match.styleId}:${match.start}-${match.end}`
-            if (session.candidateKeys.has(rangeKey))
+            if (session.acceptedRangeKeys.has(rangeKey) || session.candidateKeys.has(rangeKey))
               continue
             if (session.candidateKeys.size >= MAX_TOTAL_RANGES) {
               candidateExceeded = true
@@ -529,17 +567,20 @@ export function activate(context: ExtensionContext): void {
           else if (isRegexExecutionTimeoutError(error)) {
             chunkTimeoutCount++
             session.failedRuleIds.add(rule.id)
+            acceptPreviousSnapshot(rule.id)
             failures.recordFailure(document, rule.id)
             restartSiblingEditors(editor, document)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`, true)
           }
           else if (isRegexExecutionLimitError(error)) {
             session.failedRuleIds.add(rule.id)
+            acceptPreviousSnapshot(rule.id)
             structuralFailure.ruleIds.add(rule.id)
             warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {
             session.failedRuleIds.add(rule.id)
+            acceptPreviousSnapshot(rule.id)
             warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
           }
           break
@@ -579,8 +620,10 @@ export function activate(context: ExtensionContext): void {
     }
 
     if (sessionLimitReached) {
-      for (let index = session.nextRuleIndex; index < rules.length; index++)
+      for (let index = session.nextRuleIndex; index < rules.length; index++) {
         session.failedRuleIds.add(rules[index].id)
+        acceptPreviousSnapshot(rules[index].id)
+      }
       session.nextRuleIndex = rules.length
       session.nextSliceIndex = 0
       session.candidateKeys = new Set()
@@ -600,8 +643,10 @@ export function activate(context: ExtensionContext): void {
     if (needsContinuation) {
       session.continuationCount++
       if (session.continuationCount > MAX_SESSION_CONTINUATIONS) {
-        for (let index = session.nextRuleIndex; index < rules.length; index++)
+        for (let index = session.nextRuleIndex; index < rules.length; index++) {
           session.failedRuleIds.add(rules[index].id)
+          acceptPreviousSnapshot(rules[index].id)
+        }
         session.nextRuleIndex = rules.length
         warnOnce(`Highlight continuation limit reached in ${document.uri.fsPath}; remaining rules were skipped`)
       }
@@ -667,6 +712,23 @@ export function activate(context: ExtensionContext): void {
 
   const refreshVisibleEditors = (immediate = true) => {
     const visible = new Set(window.visibleTextEditors)
+    for (const editor of visible) {
+      if (!shouldProcess(getDocumentPath(editor.document)) || !editor.visibleRanges.length) {
+        manager.releaseEditor(editor)
+        continue
+      }
+      const selection = getRuleSelection(compiled, editor.document)
+      if (!selection.rules.length) {
+        manager.releaseEditor(editor)
+        continue
+      }
+      try {
+        manager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
+      }
+      catch (error) {
+        warnOnce(`Failed to reserve decoration profile: ${error instanceof Error ? error.message : String(error)}`, true)
+      }
+    }
     for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
         scheduler.remove(editor)
@@ -763,7 +825,9 @@ export function activate(context: ExtensionContext): void {
       structuralFailures = new WeakMap()
       failures.clear()
       executor.resetCache()
+      importantWarned.clear()
       warned.clear()
+      additionalWarningsSuppressed = false
       importantToastCount = 0
       warningToastCount = 0
       compiled.warnings.forEach(warning => warnOnce(warning))

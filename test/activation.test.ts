@@ -306,6 +306,41 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('deduplicates overlapping rules before creating VS Code ranges', async () => {
+    configuration.rules = {
+      plaintext: { light: {
+        red: Array.from({ length: 50 }, (_, index) => `[${'x'.repeat(index + 1)}]`),
+      } },
+    }
+    const editor = createEditor('x'.repeat(100), 'overlapping-ranges')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length === 100)).toBe(true), 3_000)
+    expect(editor.document.positionAt.mock.calls.length).toBeLessThan(300)
+    disposeContext(context)
+  })
+
+  it('hands an existing profile to a replacement tab before releasing the old editor', async () => {
+    configuration.rules = { plaintext: { light: { red: ['TARGET'] } } }
+    const first = createEditor('TARGET', 'tab-first')
+    const second = createEditor('TARGET', 'tab-second')
+    window.visibleTextEditors = [first] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(first.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    window.visibleTextEditors = [second] as any
+    await __events.visibleEditors.fire([second] as any)
+    await waitFor(() => expect(second.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    expect(type.dispose).not.toHaveBeenCalled()
+    disposeContext(context)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+  })
+
   it('continues after the per-chunk worker job limit', async () => {
     configuration.rules = {
       plaintext: { light: { red: [...Array.from({ length: 50 }, (_, index) => `missing-${index}`), 'TARGET'] } },
