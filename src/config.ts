@@ -375,24 +375,22 @@ export function compileConfig(raw: unknown): CompiledConfig {
   }
 
   let compiledRuleCount = 0
-  const compilationBudget: CompilationBudget = { remainingInputs: MAX_TOTAL_RULES }
   let processedLanguageKeys = 0
+  const compilationBudget: CompilationBudget = { remainingInputs: MAX_TOTAL_RULES }
   for (const languageKey in raw) {
     if (!Object.prototype.hasOwnProperty.call(raw, languageKey))
       continue
-    if (processedLanguageKeys >= MAX_LANGUAGES || compiledRuleCount >= MAX_TOTAL_RULES || compilationBudget.remainingInputs <= 0) {
-      result.warnings.push('Configuration compilation budget was reached; remaining language keys were skipped')
+    if (processedLanguageKeys >= MAX_TOTAL_RULES) {
+      result.warnings.push(`Configuration is limited to ${MAX_TOTAL_RULES} language keys`)
       break
     }
     processedLanguageKeys++
-    compilationBudget.remainingInputs--
+    if (compiledRuleCount >= MAX_TOTAL_RULES || compilationBudget.remainingInputs <= 0) {
+      result.warnings.push('Configuration compilation budget was reached; remaining language keys were skipped')
+      break
+    }
     if (languageKey.length > MAX_LANGUAGE_KEY_LENGTH) {
       result.warnings.push(`Language key exceeds ${MAX_LANGUAGE_KEY_LENGTH} characters and was skipped`)
-      continue
-    }
-    const modes = raw[languageKey]
-    if (!isStyleObject(modes)) {
-      result.warnings.push(`Rules for ${languageKey} must be an object`)
       continue
     }
     let availableLanguages = MAX_LANGUAGES - result.languages.size
@@ -412,11 +410,15 @@ export function compileConfig(raw: unknown): CompiledConfig {
         availableLanguages--
         languages.push(language)
       }
-      if (availableLanguages <= 0 && languages.every(item => !result.languages.has(item)))
-        break
     }
     if (!languages.length) {
       result.warnings.push(`Too many languages: at most ${MAX_LANGUAGES} languages are allowed`)
+      continue
+    }
+    compilationBudget.remainingInputs--
+    const modes = raw[languageKey]
+    if (!isStyleObject(modes)) {
+      result.warnings.push(`Rules for ${languageKey} must be an object`)
       continue
     }
 

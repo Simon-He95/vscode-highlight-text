@@ -276,7 +276,7 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('releases a preflight profile when the initial scan is oversized', async () => {
+  it('keeps a preflight profile while an oversized scan clears ranges', async () => {
     const editor = createEditor(`foo${'x'.repeat(200_001)}`, 'initial-scan-budget')
     window.visibleTextEditors = [editor] as any
     const context = { subscriptions: [] } as unknown as ExtensionContext
@@ -284,8 +284,9 @@ describe('extension activation orchestration', () => {
     activate(context)
     const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Visible scan exceeds 200000 characters')))
-    expect(type.dispose).toHaveBeenCalledTimes(1)
+    expect(type.dispose).not.toHaveBeenCalled()
     disposeContext(context)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('shares target layers across patterns from one style entry', async () => {
@@ -321,7 +322,11 @@ describe('extension activation orchestration', () => {
       ))).toBe(true)
     })
     expect(window.showWarningMessage).not.toHaveBeenCalledWith(expect.stringContaining('scan session limit reached'))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    expect(type.dispose).not.toHaveBeenCalled()
     disposeContext(context)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('warns when completed rules exhaust the total range budget', async () => {
@@ -433,7 +438,7 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('skips only an over-limit rule and still applies later rules', async () => {
+  it('retains the first 1000 matches and still applies later rules', async () => {
     configuration.rules = {
       plaintext: {
         light: {
@@ -450,13 +455,13 @@ describe('extension activation orchestration', () => {
     const redTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).filter(type => type.options.color === 'red')
     expect(redTypes).toHaveLength(1)
     await waitFor(() => expect(redTypes.some(type => editor.setDecorations.mock.calls.some(
-      ([appliedType, ranges]) => appliedType === type && ranges.length > 0,
+      ([appliedType, ranges]) => appliedType === type && ranges.length === 1_001,
     ))).toBe(true))
 
     disposeContext(context)
   })
 
-  it('immediately retries a match-limit rule after the document changes', async () => {
+  it('recomputes a truncated rule after the document changes', async () => {
     configuration.rules = { plaintext: { light: { red: ['x'] } } }
     const editor = createEditor('x'.repeat(1_001), 'limit-recovery')
     window.visibleTextEditors = [editor] as any

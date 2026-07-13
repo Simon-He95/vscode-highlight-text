@@ -106,7 +106,19 @@ export class DecorationManager {
     this.activeStyles.set(editor, current)
   }
 
-  clear(editor: TextEditor): void {
+  clearRanges(editor: TextEditor): void {
+    if (this.disposed)
+      return
+    const profileId = this.editorProfiles.get(editor)
+    const profile = profileId ? this.profiles.get(profileId) : undefined
+    if (!profile)
+      return
+    for (const styleId of this.activeStyles.get(editor) ?? [])
+      this.clearStyle(editor, profile, styleId)
+    this.activeStyles.set(editor, new Set())
+  }
+
+  releaseEditor(editor: TextEditor): void {
     if (this.disposed)
       return
     const profileId = this.editorProfiles.get(editor)

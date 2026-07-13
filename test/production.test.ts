@@ -112,6 +112,17 @@ describe('regex configuration', () => {
     expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many merged rules for vue'))
   })
 
+  it('merges a composite key into an existing language after language capacity is full', () => {
+    const raw = Object.fromEntries([
+      ['plaintext', { light: { red: ['first'] } }],
+      ...Array.from({ length: 99 }, (_, index) => [`lang${index}`, { light: {} }]),
+      ['newLanguage|plaintext', { light: { blue: ['second'] } }],
+    ])
+    const compiled = compileConfig(raw)
+    expect(getRulesForLanguage(compiled, 'plaintext', false).map(rule => rule.pattern.source)).toEqual(['second', 'first'])
+    expect(compiled.languages.has('newLanguage')).toBe(false)
+  })
+
   it('caps global languages, rule entries, and retained styles', () => {
     const patterns = Array.from({ length: 1_000 }, (_, index) => `p${index}`)
     const raw = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [
@@ -757,16 +768,36 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
-  it('enforces the accepted match limit across slices', async () => {
+  it('returns the first accepted matches and marks excess output as truncated', async () => {
     const executor = new RegexExecutor(500)
-    await expect(executor.execute({
+    const results = await executor.execute({
+      ignores: [],
+      maxMatches: 3,
+      pattern: { source: '.', flags: 'gd' },
+      targetGroups: [0],
+      text: 'abcd',
+    })
+    expect(results).toEqual([
+      { spans: [[0, 1]] },
+      { spans: [[1, 2]] },
+      { spans: [[2, 3]] },
+    ])
+    expect(results.truncated).toBe(true)
+    executor.dispose()
+  })
+
+  it('truncates the accepted match limit across slices', async () => {
+    const executor = new RegexExecutor(500)
+    const results = await executor.execute({
       acceptedMatchOffset: 9,
       ignores: [],
       maxMatches: 10,
       pattern: { source: 'x', flags: 'gd' },
       targetGroups: [0],
       text: 'xx',
-    })).rejects.toThrow('Main pattern exceeded 10 matches')
+    })
+    expect(results).toEqual([{ spans: [[0, 1]] }])
+    expect(results.truncated).toBe(true)
     executor.dispose()
   })
 
@@ -783,15 +814,19 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
-  it('rejects a partial main-pattern result set', async () => {
+  it('returns a deterministic partial main-pattern result set', async () => {
     const executor = new RegexExecutor(500)
-    await expect(executor.execute({
+    const results = await executor.execute({
       ignores: [],
       maxMatches: 10,
       pattern: { source: 'x', flags: 'gd' },
       targetGroups: [0],
       text: 'x'.repeat(11),
-    })).rejects.toThrow('Main pattern exceeded 10 matches')
+    })
+    expect(results).toHaveLength(10)
+    expect(results[0]).toEqual({ spans: [[0, 1]] })
+    expect(results[9]).toEqual({ spans: [[9, 10]] })
+    expect(results.truncated).toBe(true)
     executor.dispose()
   })
 
@@ -1273,7 +1308,7 @@ describe('decoration lifecycle', () => {
     const editor = new MockEditor() as any
     manager.reserveProfile(editor, 'reserved', ['a'])
     const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
-    manager.clear(editor)
+    manager.releaseEditor(editor)
     expect(type.dispose).toHaveBeenCalledTimes(1)
     manager.dispose()
   })
@@ -1286,9 +1321,9 @@ describe('decoration lifecycle', () => {
     manager.apply(second, new Map([['a', [range(0, 1)]]]), 'plaintext:light', ['a'])
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
     const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
-    manager.clear(first)
+    manager.releaseEditor(first)
     expect(type.dispose).not.toHaveBeenCalled()
-    manager.clear(second)
+    manager.releaseEditor(second)
     expect(type.dispose).toHaveBeenCalledTimes(1)
     manager.dispose()
   })
@@ -1302,7 +1337,7 @@ describe('decoration lifecycle', () => {
     manager.reserveProfile(first, 'a', layersA)
     manager.reserveProfile(second, 'a', layersA)
     expect(() => manager.reserveProfile(first, 'b', layersB)).toThrow('Decoration type budget exceeded')
-    manager.clear(second)
+    manager.releaseEditor(second)
     expect(() => manager.reserveProfile(first, 'b', layersB)).not.toThrow()
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2_000)
     manager.dispose()

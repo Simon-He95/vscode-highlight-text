@@ -151,7 +151,7 @@ export async function scanRule(
   maxSpans: number,
   refreshSpanBudget: boolean,
   executionTimeoutMs?: number,
-): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }> }> {
+): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }>, truncated: boolean }> {
   let executionMs = 0
   const matches = await executor.execute({
     acceptedMatchOffset,
@@ -187,7 +187,7 @@ export async function scanRule(
       acceptedMatchCount++
     return matchRanges
   })
-  return { acceptedMatchCount, executionMs, ranges }
+  return { acceptedMatchCount, executionMs, ranges, truncated: matches.truncated === true }
 }
 
 const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
@@ -293,7 +293,7 @@ export function activate(context: ExtensionContext): void {
     }
     catch (error) {
       initialManagerError ??= error
-      manager.clear(editor)
+      manager.releaseEditor(editor)
     }
   }
   let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
@@ -345,7 +345,7 @@ export function activate(context: ExtensionContext): void {
     const clearEditor = () => {
       ruleSnapshots.delete(editor)
       scanSessions.delete(editor)
-      manager.clear(editor)
+      manager.releaseEditor(editor)
     }
     if (!shouldProcess(getDocumentPath(document)) || !editor.visibleRanges.length) {
       if (isCurrent())
@@ -369,7 +369,7 @@ export function activate(context: ExtensionContext): void {
       if (canPreservePrevious)
         return
       ruleSnapshots.delete(editor)
-      manager.clear(editor)
+      manager.clearRanges(editor)
     }
     if (!scanPlan.complete) {
       clearStaleSnapshot()
@@ -496,7 +496,13 @@ export function activate(context: ExtensionContext): void {
           }
           session.currentRuleMatchCount += scanResult.acceptedMatchCount
           session.infrastructureRetryCount = 0
-          session.nextSliceIndex++
+          if (scanResult.truncated) {
+            session.nextSliceIndex = scanPlan.slices.length
+            warnOnce(`${rule.context}: Main pattern exceeded ${MAX_MATCHES_PER_RULE} matches in ${document.uri.fsPath}; the first ${MAX_MATCHES_PER_RULE} matches were retained`)
+          }
+          else {
+            session.nextSliceIndex++
+          }
         }
         catch (error) {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
@@ -670,7 +676,7 @@ export function activate(context: ExtensionContext): void {
         retryTimers.delete(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
-        manager.clear(editor)
+        manager.releaseEditor(editor)
       }
     }
     window.visibleTextEditors.forEach(editor => scheduler.schedule(editor, immediate))
@@ -679,7 +685,7 @@ export function activate(context: ExtensionContext): void {
   const refreshForTheme = () => {
     for (const editor of window.visibleTextEditors) {
       scheduler.invalidate(editor)
-      manager.clear(editor)
+      manager.releaseEditor(editor)
     }
     ruleSnapshots = new WeakMap()
     refreshVisibleEditors(true)
@@ -698,7 +704,7 @@ export function activate(context: ExtensionContext): void {
         if (editor.document === document) {
           scheduler.invalidate(editor)
           ruleSnapshots.delete(editor)
-          manager.clear(editor)
+          manager.releaseEditor(editor)
         }
       }
     }),

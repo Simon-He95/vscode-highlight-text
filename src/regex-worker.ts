@@ -2,6 +2,8 @@ import type { Worker as WorkerType } from 'node:worker_threads'
 import type { CompiledPattern, MatchResult } from './type'
 import { Worker } from 'node:worker_threads'
 
+export type WorkerMatchResults = MatchResult[] & { truncated?: boolean }
+
 export interface WorkerRequest {
   acceptedMatchOffset?: number
   cacheGeneration?: number
@@ -22,6 +24,7 @@ interface WorkerResponse {
   id: number
   results?: MatchResult[]
   started?: boolean
+  truncated?: boolean
 }
 
 interface PendingJob {
@@ -30,7 +33,7 @@ interface PendingJob {
   onExecutionComplete?: (durationMs: number) => void
   reject: (error: Error) => void
   request: WorkerRequest
-  resolve: (results: MatchResult[]) => void
+  resolve: (results: WorkerMatchResults) => void
   signal?: AbortSignal
 }
 
@@ -209,6 +212,7 @@ parentPort.on('message', ({ id, request }) => {
     const originalSearch = hasIgnores ? new RegExp(request.pattern.source, request.pattern.flags) : undefined
     const preIntervalSearch = hasIgnores ? new RegExp(request.pattern.source, request.pattern.flags) : undefined
     const maxSpans = request.maxSpans ?? 10000
+    let matchTruncated = false
     let spanCount = 0
     const results = []
     const rawMatchLimit = Math.max(request.maxMatches * 10, 10000)
@@ -289,9 +293,8 @@ parentPort.on('message', ({ id, request }) => {
       }
       if (validSpanCount) {
         if ((request.acceptedMatchOffset ?? 0) + results.length >= request.maxMatches) {
-          const error = new Error('Main pattern exceeded ' + request.maxMatches + ' matches')
-          error.code = 'MATCH_LIMIT'
-          throw error
+          matchTruncated = true
+          return false
         }
         spanCount += validSpanCount
         results.push(request.includeFullSpan ? { fullSpan: acceptedFullSpan, spans: acceptedSpans } : { spans: acceptedSpans })
@@ -308,7 +311,7 @@ parentPort.on('message', ({ id, request }) => {
       throw error
     }
     parentPort.postMessage({ id, finished: true })
-    parentPort.postMessage({ id, results })
+    parentPort.postMessage({ id, results, truncated: matchTruncated })
   }
   catch (error) {
     parentPort.postMessage({ id, finished: true })
@@ -408,7 +411,7 @@ export class RegexExecutor {
     signal?: AbortSignal,
     onExecutionComplete?: (durationMs: number) => void,
     executionTimeoutMs = this.timeoutMs,
-  ): Promise<MatchResult[]> {
+  ): Promise<WorkerMatchResults> {
     if (this.disposed || signal?.aborted)
       return Promise.reject(new RegexExecutionAbortedError())
     if (Date.now() < this.infrastructureBlockedUntil)
@@ -627,6 +630,9 @@ export class RegexExecutor {
         executionStartedAt = Date.now()
         executionFinishedAt = executionStartedAt
       }
+      const results = message.results ?? []
+      if (message.truncated)
+        Object.defineProperty(results, 'truncated', { value: true })
       const error = message.error
         ? message.errorCode === 'REFRESH_BUDGET'
           ? new RegexExecutionBudgetError(message.error)
@@ -634,7 +640,7 @@ export class RegexExecutor {
             ? new RegexExecutionLimitError(message.error)
             : new Error(message.error)
         : undefined
-      finish(error, message.results ?? [])
+      finish(error, results)
     }
 
     this.activeCancel = error => finish(error, undefined, true)
