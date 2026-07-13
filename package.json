@@ -42,6 +42,7 @@
     "vscode": "^1.77.0"
   },
   "activationEvents": [
+    "onLanguage",
     "onStartupFinished"
   ],
   "contributes": {
@@ -289,8 +290,10 @@
           ],
           "description": "Directories to be skipped.",
           "items": {
-            "type": "string"
-          }
+            "type": "string",
+            "maxLength": 1000
+          },
+          "maxItems": 100
         }
       }
     },
@@ -317,14 +320,15 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^3.16.0",
-    "@rollup/pluginutils": "^5.1.4",
     "@types/node": "^18.19.111",
+    "@types/picomatch": "^4.0.2",
     "@types/vscode": "1.77.0",
     "@vscode-use/utils": "^0.1.58",
     "@vscode/vsce": "^3.5.0",
     "bumpp": "^9.11.1",
     "eslint": "^9.28.0",
     "lazy-js-utils": "^0.1.44",
+    "picomatch": "^4.0.2",
     "tsup": "^6.7.0",
     "typescript": "^5.8.3",
     "vitest": "^0.29.8"

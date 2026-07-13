@@ -143,6 +143,19 @@ describe('regex configuration', () => {
     expect(compiled.warnings.length).toBeLessThanOrEqual(100)
   })
 
+  it('rolls back canonical style IDs and cannot bypass the global style cap', () => {
+    const light: Record<string, unknown> = {}
+    for (let rule = 0; rule < 11; rule++) {
+      const matchCss = Array.from({ length: 100 }, (_, target) => ({ color: `rgb(${rule},${target},0)` }))
+      light[`bad-${rule}`] = { match: ['('], matchCss }
+      light[`good-${rule}`] = { match: [`good-${rule}`], matchCss }
+    }
+    const compiled = compileConfig({ plaintext: { light } })
+    expect(compiled.styles.size).toBe(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Configuration exceeds 1000 unique styles'))
+    expect([...compiled.styles.keys()]).toSatisfy((ids: string[]) => new Set(ids).size === ids.length)
+  })
+
   it('stops reading configuration values after compilation budgets are reached', () => {
     const raw: Record<string, unknown> = {}
     for (let index = 0; index < 101; index++) {
@@ -281,6 +294,18 @@ describe('regex configuration', () => {
     const windowsFilter = createExcludeFilter(['C:\\Repo\\dist\\**'])
     expect(windowsFilter('/c:/repo/dist/index.js')).toBe(false)
     expect(windowsFilter('c:\\REPO\\src\\index.js')).toBe(true)
+  })
+
+  it('bounds exclude pattern count and length before matching', () => {
+    const patterns = [...Array.from({ length: 100 }, (_, index) => `missing-${index}/**`), '**/blocked/**']
+    const filter = createExcludeFilter(patterns)
+    expect(filter('/repo/blocked/file.js')).toBe(true)
+    const longFilter = createExcludeFilter(['x'.repeat(1_001)])
+    expect(longFilter(`/repo/${'x'.repeat(1_001)}`)).toBe(true)
+    expect(packageJson.contributes.configuration.properties['vscode-highlight-text.exclude']).toMatchObject({
+      maxItems: 100,
+      items: { maxLength: 1_000 },
+    })
   })
 
   it('normalizes styles, empty excludes, and rule-local ignores', () => {

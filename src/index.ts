@@ -292,6 +292,7 @@ export function activate(context: ExtensionContext): void {
 
   const retryTimers = new Map<TextEditor, ReturnType<typeof setTimeout>>()
   let scheduleContinuation = (_editor: TextEditor) => {}
+  let restartSiblingEditors = (_editor: TextEditor, _document: TextDocument) => {}
   let scheduleInfrastructureRetry = (_editor: TextEditor, _delay: number, _isCurrent: () => boolean) => {}
 
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
@@ -465,6 +466,7 @@ export function activate(context: ExtensionContext): void {
             chunkTimeoutCount++
             session.failedRuleIds.add(rule.id)
             failures.recordFailure(document, rule.id)
+            restartSiblingEditors(editor, document)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
           }
           else if (isRegexExecutionLimitError(error)) {
@@ -580,6 +582,12 @@ export function activate(context: ExtensionContext): void {
     error => warnOnce(error instanceof Error ? error.message : String(error)),
   )
   scheduleContinuation = editor => scheduler.schedule(editor, true)
+  restartSiblingEditors = (editor, document) => {
+    for (const sibling of window.visibleTextEditors) {
+      if (sibling !== editor && sibling.document === document)
+        scheduler.schedule(sibling, true)
+    }
+  }
   scheduleInfrastructureRetry = (editor, delay, isCurrent) => {
     const previous = retryTimers.get(editor)
     if (previous)

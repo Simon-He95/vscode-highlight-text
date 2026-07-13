@@ -1,11 +1,14 @@
 import type { DecorationRenderOptions } from 'vscode'
 import type { CompiledConfig, CompiledRule, CompiledTarget, PatternInput, UserConfig } from './type'
 import { isAbsolute } from 'node:path'
-import { createFilter } from '@rollup/pluginutils'
+import picomatch from 'picomatch'
 import { DecorationRangeBehavior } from 'vscode'
 import { compilePattern, isPatternTuple, isRegexSafe, normalizePatterns } from './regex'
 
 const MAX_IGNORE_PATTERNS_PER_RULE = 100
+const MAX_EXCLUDE_PATTERNS = 100
+const MAX_EXCLUDE_PATTERN_LENGTH = 1_000
+const MAX_EXCLUDE_CACHE_ENTRIES = 1_000
 const MAX_LANGUAGES = 100
 const MAX_LANGUAGE_KEY_LENGTH = 1000
 const MAX_RULES_PER_MODE = 1000
@@ -246,6 +249,20 @@ function compileStyleRules(
   })
 }
 
+function rollbackStyles(config: CompiledConfig, styleIds: Set<string>, canonicalKeys: Set<string>): void {
+  for (const styleId of config.styles.keys()) {
+    if (!styleIds.has(styleId))
+      config.styles.delete(styleId)
+  }
+  const ids = STYLE_IDS.get(config)
+  if (!ids)
+    return
+  for (const canonical of ids.keys()) {
+    if (!canonicalKeys.has(canonical))
+      ids.delete(canonical)
+  }
+}
+
 function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig, budget: CompilationBudget, maxRules = MAX_RULES_PER_MODE): CompiledRule[] {
   if (!isStyleObject(raw))
     return []
@@ -264,22 +281,16 @@ function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', con
     budget.remainingInputs--
     const value = raw[color]
     const previousStyleIds = new Set(config.styles.keys())
+    const previousCanonicalKeys = new Set(STYLE_IDS.get(config)?.keys() ?? [])
     try {
       const remaining = maxRules - rules.length
       const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, config, budget).slice(0, remaining)
-      if (!compiled.length) {
-        for (const styleId of config.styles.keys()) {
-          if (!previousStyleIds.has(styleId))
-            config.styles.delete(styleId)
-        }
-      }
+      if (!compiled.length)
+        rollbackStyles(config, previousStyleIds, previousCanonicalKeys)
       rules.push(...compiled)
     }
     catch (error) {
-      for (const styleId of config.styles.keys()) {
-        if (!previousStyleIds.has(styleId))
-          config.styles.delete(styleId)
-      }
+      rollbackStyles(config, previousStyleIds, previousCanonicalKeys)
       config.warnings.push(`Invalid configuration for ${language}.${mode}.${color}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -389,6 +400,8 @@ export function compileConfig(raw: unknown): CompiledConfig {
     if (!usedStyleIds.has(styleId))
       result.styles.delete(styleId)
   }
+  // Canonical keys are compile-time-only; dropping the registry prevents pruned styles from being retained.
+  STYLE_IDS.delete(result)
   return result
 }
 
@@ -401,21 +414,36 @@ function normalizeFilterPath(value: string): string {
 
 export function createExcludeFilter(value: unknown): (path: string) => boolean {
   const patterns = Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string').map((pattern) => {
-        const negated = pattern.startsWith('!')
-        const body = normalizeFilterPath(negated ? pattern.slice(1) : pattern)
-        const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
-        const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
-        const filter = createFilter(undefined, [normalized], { resolve: false })
-        return { matches: (path: string) => !filter(normalizeFilterPath(path)), negated }
-      })
+    ? value.filter((item): item is string => typeof item === 'string')
+        .slice(0, MAX_EXCLUDE_PATTERNS)
+        .filter(pattern => pattern.length <= MAX_EXCLUDE_PATTERN_LENGTH)
+        .flatMap((pattern) => {
+          const negated = pattern.startsWith('!')
+          const body = normalizeFilterPath(negated ? pattern.slice(1) : pattern)
+          const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
+          const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
+          try {
+            return [{ matcher: picomatch(normalized, { dot: true }), negated }]
+          }
+          catch {
+            return []
+          }
+        })
     : []
+  const cache = new Map<string, boolean>()
   return (path) => {
+    const normalizedPath = normalizeFilterPath(path)
+    const cached = cache.get(normalizedPath)
+    if (cached !== undefined)
+      return cached
     let included = true
     for (const pattern of patterns) {
-      if (pattern.matches(path))
+      if (pattern.matcher(normalizedPath))
         included = pattern.negated
     }
+    if (cache.size >= MAX_EXCLUDE_CACHE_ENTRIES)
+      cache.clear()
+    cache.set(normalizedPath, included)
     return included
   }
 }

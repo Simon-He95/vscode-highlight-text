@@ -88,7 +88,7 @@ describe('vue TSX language detection', () => {
     expect(getRuleLanguageId(lateScript.document as any)).toBe('vuetsx')
     expect(lateScript.document.getText).toHaveBeenCalledTimes(reads)
 
-    const beyondLimit = createEditor(`${'x'.repeat(1_000_001)}<script lang="tsx"></script>`, 'limited-vue')
+    const beyondLimit = createEditor(`${'x'.repeat(300_001)}<script lang="tsx"></script>`, 'limited-vue')
     beyondLimit.document.languageId = 'vue'
     expect(getRuleLanguageId(beyondLimit.document as any)).toBe('vue')
   })
@@ -209,6 +209,30 @@ describe('extension activation orchestration', () => {
     await __events.visibleEditors.fire([...window.visibleTextEditors])
     await waitFor(() => expect(first.setDecorations).toHaveBeenCalledWith(expect.anything(), []))
 
+    disposeContext(context)
+  })
+
+  it('cancels a duplicate timed-out rule queued by a split editor', async () => {
+    configuration.rules = { plaintext: { light: { red: ['(a+)+$'], green: ['NORMAL'] } } }
+    const first = createEditor(`${'a'.repeat(20_000)}b NORMAL`, 'split-timeout')
+    const second = createEditor('', 'split-timeout-copy')
+    second.document = first.document
+    second.visibleRanges = first.visibleRanges
+    window.visibleTextEditors = [first, second] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => {
+      const timeoutWarnings = vi.mocked(window.showWarningMessage).mock.calls.filter(([message]) => String(message).includes('exceeded 500ms'))
+      expect(timeoutWarnings).toHaveLength(1)
+    }, 2_000)
+    await waitFor(() => {
+      for (const editor of [first, second])
+        expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true)
+    }, 2_000)
+    await new Promise(resolve => setTimeout(resolve, 600))
+    const timeoutWarnings = vi.mocked(window.showWarningMessage).mock.calls.filter(([message]) => String(message).includes('exceeded 500ms'))
+    expect(timeoutWarnings).toHaveLength(1)
     disposeContext(context)
   })
 
