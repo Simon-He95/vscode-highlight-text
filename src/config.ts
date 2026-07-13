@@ -447,23 +447,16 @@ export function compileConfig(raw: unknown): CompiledConfig {
     }
   }
 
-  let totalRules = 0
-  let rulesTruncated = false
+  const usedRules = new Set<CompiledRule>()
   const usedStyleIds = new Set<string>()
-  for (const [language, modes] of result.languages) {
-    const limitMode = (rules: CompiledRule[]) => rules.filter((rule) => {
-      if (totalRules >= MAX_TOTAL_RULES) {
-        rulesTruncated = true
-        return false
-      }
-      totalRules++
+  for (const modes of result.languages.values()) {
+    for (const rule of [...modes.dark, ...modes.light]) {
+      if (usedRules.has(rule))
+        continue
+      usedRules.add(rule)
       rule.targets.forEach(target => usedStyleIds.add(target.styleId))
-      return true
-    })
-    result.languages.set(language, { dark: limitMode(modes.dark), light: limitMode(modes.light) })
+    }
   }
-  if (rulesTruncated)
-    result.warnings.push(`Configuration is limited to ${MAX_TOTAL_RULES} total language-mode rule entries`)
   for (const styleId of result.styles.keys()) {
     if (!usedStyleIds.has(styleId))
       result.styles.delete(styleId)

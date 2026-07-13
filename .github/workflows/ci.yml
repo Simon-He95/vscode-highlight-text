@@ -70,18 +70,50 @@ jobs:
           node --check dist/index.js
           node - <<'NODE'
           const { RegexExecutor } = require('./temp/runtime-smoke/regex-worker.js')
-          const executor = new RegexExecutor(500)
-          executor.execute({
+
+          const request = (source, text) => ({
             ignores: [],
             maxMatches: 10,
-            pattern: { source: '(?=(.))', flags: 'gdu' },
-            targetGroups: [1],
-            text: '😀a',
-          }).then((results) => {
+            pattern: { source, flags: 'gdu' },
+            targetGroups: [0],
+            text,
+          })
+
+          async function main() {
+            const executor = new RegexExecutor(100)
+            const unicode = await executor.execute({ ...request('(?=(.))', '😀a'), targetGroups: [1] })
+            if (JSON.stringify(unicode) !== JSON.stringify([{ spans: [[0, 2]] }, { spans: [[2, 3]] }]))
+              throw new Error('Unicode indices smoke failed')
+
+            await executor.execute(request('(a+)+$', `${'a'.repeat(20_000)}b`)).then(
+              () => { throw new Error('Expected catastrophic regex timeout') },
+              error => {
+                if (!String(error.message).includes('exceeded 100ms'))
+                  throw error
+              },
+            )
+            const recovered = await executor.execute(request('TARGET', 'TARGET'))
+            if (JSON.stringify(recovered) !== JSON.stringify([{ spans: [[0, 6]] }]))
+              throw new Error('Worker timeout recovery smoke failed')
+
+            const controller = new AbortController()
+            const aborted = executor.execute(request('(a+)+$', `${'a'.repeat(20_000)}b`), controller.signal)
+            setTimeout(() => controller.abort(), 10)
+            await aborted.then(
+              () => { throw new Error('Expected active worker abort') },
+              error => {
+                if (!String(error.message).includes('cancelled'))
+                  throw error
+              },
+            )
+            await executor.execute(request('OK', 'OK'))
             executor.dispose()
-            if (JSON.stringify(results) !== JSON.stringify([{ spans: [[0, 2]] }, { spans: [[2, 3]] }]))
-              process.exit(1)
-          }).catch(() => process.exit(1))
+          }
+
+          main().catch((error) => {
+            console.error(error)
+            process.exitCode = 1
+          })
           NODE
 
   package:

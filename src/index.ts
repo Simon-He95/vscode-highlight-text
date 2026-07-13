@@ -57,12 +57,12 @@ interface ScanPlan {
 }
 
 interface ScanSlice {
+  acceptedIntervals: Array<[number, number]>
   artificialEnd: boolean
   artificialStart: boolean
-  coreEnd: number
-  coreStart: number
   scanStart: number
   text: string
+  textKey: string
 }
 
 function getExecutionDuration(error: unknown): number {
@@ -102,41 +102,68 @@ export function nextCodePointOffset(document: TextDocument, offset: number, docu
 
 function getScanSlices(editor: TextEditor): ScanPlan {
   const document = editor.document
-  const ranges = editor.visibleRanges
-    .map((visible) => {
-      const startLine = Math.max(0, visible.start.line - OVERSCAN_LINES)
-      const endLine = Math.min(document.lineCount - 1, visible.end.line + OVERSCAN_LINES)
-      const start = document.offsetAt(new Position(startLine, 0))
-      const end = document.offsetAt(document.lineAt(endLine).rangeIncludingLineBreak.end)
-      return { start, end }
-    })
+  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
+  const visible = editor.visibleRanges
+    .map(range => ({ start: document.offsetAt(range.start), end: document.offsetAt(range.end) }))
     .sort((a, b) => a.start - b.start)
-
-  const merged: Array<{ end: number, start: number }> = []
-  for (const range of ranges) {
-    const previous = merged.at(-1)
+  const mergedVisible: Array<{ end: number, start: number }> = []
+  for (const range of visible) {
+    const previous = mergedVisible.at(-1)
     if (previous && range.start <= previous.end)
       previous.end = Math.max(previous.end, range.end)
     else
-      merged.push({ ...range })
+      mergedVisible.push({ ...range })
   }
-
-  const scanKey = merged.map(range => `${range.start}:${range.end}`).join(',')
-  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
-  const plannedSlices = merged.map(({ start, end }) => ({
-    artificialStart: start > 0,
-    artificialEnd: end < documentEnd,
-    coreStart: start,
-    coreEnd: end,
-    scanStart: previousCodePointOffset(document, start),
-    scanEnd: nextCodePointOffset(document, end, documentEnd),
-  }))
-  const totalSize = plannedSlices.reduce((total, slice) => total + slice.scanEnd - slice.scanStart, 0)
-  if (totalSize > MAX_SCAN_SIZE)
+  const scanKey = mergedVisible.map(range => `${range.start}:${range.end}`).join(',')
+  const visibleSize = mergedVisible.reduce((total, range) => total + range.end - range.start, 0)
+  if (visibleSize > MAX_SCAN_SIZE)
     return { complete: false, scanKey, slices: [] }
-  const slices = plannedSlices.map(({ scanEnd, ...slice }) => ({
+
+  const contexts = mergedVisible.map((range) => {
+    const startLine = document.positionAt(range.start).line
+    const endLine = document.positionAt(range.end).line
+    const contextStartLine = Math.max(0, startLine - OVERSCAN_LINES)
+    const contextEndLine = Math.min(document.lineCount - 1, endLine + OVERSCAN_LINES)
+    return {
+      contextEnd: document.offsetAt(document.lineAt(contextEndLine).rangeIncludingLineBreak.end),
+      contextStart: document.offsetAt(new Position(contextStartLine, 0)),
+      visible: range,
+    }
+  })
+
+  let contextBudget = MAX_SCAN_SIZE - visibleSize
+  const planned = contexts.map((context, index) => {
+    const remainingContexts = contexts.length - index
+    const share = Math.floor(contextBudget / remainingContexts)
+    const leftAvailable = context.visible.start - context.contextStart
+    const rightAvailable = context.contextEnd - context.visible.end
+    const left = Math.min(leftAvailable, Math.floor(share / 2))
+    const right = Math.min(rightAvailable, share - left)
+    contextBudget -= left + right
+    let scanStart = context.visible.start - left
+    let scanEnd = context.visible.end + right
+    if (scanStart < context.visible.start) {
+      const probe = document.getText(new Range(document.positionAt(Math.max(0, scanStart - 1)), document.positionAt(Math.min(documentEnd, scanStart + 1))))
+      if (probe.length === 2 && probe.charCodeAt(0) >= 0xD800 && probe.charCodeAt(0) <= 0xDBFF && probe.charCodeAt(1) >= 0xDC00 && probe.charCodeAt(1) <= 0xDFFF)
+        scanStart++
+    }
+    if (scanEnd > context.visible.end && scanEnd < documentEnd) {
+      const probe = document.getText(new Range(document.positionAt(scanEnd - 1), document.positionAt(scanEnd + 1)))
+      if (probe.length === 2 && probe.charCodeAt(0) >= 0xD800 && probe.charCodeAt(0) <= 0xDBFF && probe.charCodeAt(1) >= 0xDC00 && probe.charCodeAt(1) <= 0xDFFF)
+        scanEnd--
+    }
+    return {
+      acceptedIntervals: [[context.visible.start - scanStart, context.visible.end - scanStart] as [number, number]],
+      artificialEnd: scanEnd < documentEnd,
+      artificialStart: scanStart > 0,
+      scanEnd,
+      scanStart,
+    }
+  })
+  const slices = planned.map(({ scanEnd, ...slice }, index) => ({
     ...slice,
     text: document.getText(new Range(document.positionAt(slice.scanStart), document.positionAt(scanEnd))),
+    textKey: JSON.stringify([getDocumentPath(document), document.version, scanKey, index, slice.scanStart, scanEnd]),
   }))
   return { complete: true, scanKey, slices }
 }
@@ -154,6 +181,7 @@ export async function scanRule(
 ): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }>, truncated: boolean }> {
   let executionMs = 0
   const matches = await executor.execute({
+    acceptedIntervals: slice.acceptedIntervals,
     acceptedMatchOffset,
     ignores: rule.ignores,
     includeFullSpan: true,
@@ -163,6 +191,7 @@ export async function scanRule(
     pattern: rule.pattern,
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
+    textKey: slice.textKey,
   }, signal, durationMs => executionMs = durationMs, executionTimeoutMs)
 
   let acceptedMatchCount = 0
@@ -179,9 +208,7 @@ export async function scanRule(
         return []
       const start = slice.scanStart + span[0]
       const end = slice.scanStart + span[1]
-      return start >= slice.coreStart && end <= slice.coreEnd
-        ? [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
-        : []
+      return [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
     })
     if (matchRanges.length)
       acceptedMatchCount++

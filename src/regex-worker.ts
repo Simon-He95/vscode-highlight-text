@@ -5,6 +5,7 @@ import { Worker } from 'node:worker_threads'
 export type WorkerMatchResults = MatchResult[] & { truncated?: boolean }
 
 export interface WorkerRequest {
+  acceptedIntervals?: Array<[number, number]>
   acceptedMatchOffset?: number
   cacheGeneration?: number
   ignores: CompiledPattern[]
@@ -15,6 +16,7 @@ export interface WorkerRequest {
   pattern: CompiledPattern
   targetGroups: Array<number | undefined>
   text: string
+  textKey?: string
 }
 
 interface WorkerResponse {
@@ -39,11 +41,9 @@ interface PendingJob {
 
 const WORKER_SOURCE = String.raw`
 const { parentPort } = require('node:worker_threads')
-let cachedText
-let ignoreCache = new Map()
-let ignoreCacheIntervalCount = 0
-let ignoreCacheTextUnits = 0
+let textCache = new Map()
 let cachedGeneration = -1
+let cachedTextUnits = 0
 const MAX_IGNORE_INTERVALS = 10000
 const MAX_CACHED_IGNORE_INTERVALS = 20000
 const MAX_CACHED_TEXT_UNITS = 2000000
@@ -67,7 +67,7 @@ function collect(regex, text, limit, onMatch, maxRetries = 0) {
     const outcome = onMatch(match)
     if (outcome === 'retry')
       retries++
-    else
+    else if (outcome !== 'skip')
       count++
     if (match.index === regex.lastIndex)
       regex.lastIndex = advanceStringIndex(text, regex.lastIndex, regex.unicode || regex.unicodeSets)
@@ -81,21 +81,35 @@ function collect(regex, text, limit, onMatch, maxRetries = 0) {
 parentPort.on('message', ({ id, request }) => {
   parentPort.postMessage({ id, started: true })
   try {
-    if (request.text !== undefined) {
-      cachedText = request.text
-      ignoreCache = new Map()
-      ignoreCacheIntervalCount = 0
-      ignoreCacheTextUnits = 0
-    }
     if (request.cacheGeneration !== cachedGeneration) {
       cachedGeneration = request.cacheGeneration
-      ignoreCache = new Map()
-      ignoreCacheIntervalCount = 0
-      ignoreCacheTextUnits = 0
+      textCache = new Map()
+      cachedTextUnits = 0
     }
-    if (cachedText === undefined)
+    const textKey = request.textKey || 'default'
+    let entry = textCache.get(textKey)
+    if (request.text !== undefined) {
+      if (entry)
+        cachedTextUnits -= entry.text.length
+      entry = { text: request.text, ignoreCache: new Map(), ignoreCacheIntervalCount: 0, ignoreCacheTextUnits: 0 }
+      textCache.delete(textKey)
+      textCache.set(textKey, entry)
+      cachedTextUnits += request.text.length
+      while (textCache.size > 4 || cachedTextUnits > MAX_CACHED_TEXT_UNITS) {
+        const oldest = textCache.keys().next()
+        if (oldest.done || oldest.value === textKey && textCache.size === 1)
+          break
+        const removed = textCache.get(oldest.value)
+        cachedTextUnits -= removed.text.length
+        textCache.delete(oldest.value)
+      }
+    }
+    if (!entry)
       throw new Error('Regular expression worker text is not initialized')
-    const text = cachedText
+    textCache.delete(textKey)
+    textCache.set(textKey, entry)
+    const text = entry.text
+    const ignoreCache = entry.ignoreCache
     const maxIgnoreMatches = Math.max(request.maxMatches, 1000)
     const ignoreKey = JSON.stringify([request.ignores, maxIgnoreMatches])
     let ignoreEntry = ignoreCache.get(ignoreKey)
@@ -141,21 +155,21 @@ parentPort.on('message', ({ id, request }) => {
       maskedText += text.slice(cursor)
       while (ignoreCache.size && (
         ignoreCache.size >= 100
-        || ignoreCacheIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS
-        || ignoreCacheTextUnits + maskedText.length > MAX_CACHED_TEXT_UNITS
+        || entry.ignoreCacheIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS
+        || entry.ignoreCacheTextUnits + maskedText.length > MAX_CACHED_TEXT_UNITS
       )) {
         const oldest = ignoreCache.keys().next()
         if (oldest.done)
           break
         const oldestEntry = ignoreCache.get(oldest.value)
-        ignoreCacheIntervalCount -= oldestEntry.intervals.length
-        ignoreCacheTextUnits -= oldestEntry.maskedText.length
+        entry.ignoreCacheIntervalCount -= oldestEntry.intervals.length
+        entry.ignoreCacheTextUnits -= oldestEntry.maskedText.length
         ignoreCache.delete(oldest.value)
       }
       ignoreEntry = { intervals: mergedIgnored, maskedText }
       ignoreCache.set(ignoreKey, ignoreEntry)
-      ignoreCacheIntervalCount += mergedIgnored.length
-      ignoreCacheTextUnits += maskedText.length
+      entry.ignoreCacheIntervalCount += mergedIgnored.length
+      entry.ignoreCacheTextUnits += maskedText.length
     }
     const mergedIgnored = ignoreEntry.intervals
     const maskedText = ignoreEntry.maskedText
@@ -285,7 +299,14 @@ parentPort.on('message', ({ id, request }) => {
       else if (overlapping || acceptedSpans.some(span => span && overlapsIgnored(span))) {
         return
       }
+      if (request.acceptedIntervals) {
+        acceptedSpans = acceptedSpans.map(span => span && request.acceptedIntervals.some(
+          interval => interval[0] <= span[0] && span[1] <= interval[1],
+        ) ? span : undefined)
+      }
       const validSpanCount = acceptedSpans.filter(Boolean).length
+      if (!validSpanCount)
+        return 'skip'
       if (spanCount + validSpanCount > maxSpans) {
         const error = new Error('Rule output exceeded the remaining ' + maxSpans + ' span budget')
         error.code = request.refreshSpanBudget ? 'REFRESH_BUDGET' : 'SPAN_BUDGET'
@@ -391,7 +412,7 @@ export class RegexExecutor {
   private readonly pending: PendingJob[] = []
   private terminating?: Promise<void>
   private worker?: WorkerType
-  private workerText?: string
+  private readonly workerTexts = new Map<string, number>()
 
   constructor(
     private readonly timeoutMs = 500,
@@ -404,6 +425,7 @@ export class RegexExecutor {
 
   resetCache(): void {
     this.cacheGeneration++
+    this.workerTexts.clear()
   }
 
   execute(
@@ -439,7 +461,7 @@ export class RegexExecutor {
     }
     void this.worker?.terminate()
     this.worker = undefined
-    this.workerText = undefined
+    this.workerTexts.clear()
   }
 
   private cancel(job: PendingJob): void {
@@ -463,16 +485,16 @@ export class RegexExecutor {
       worker.on('error', () => {
         if (this.worker === worker) {
           this.worker = undefined
-          this.workerText = undefined
+          this.workerTexts.clear()
         }
       })
       worker.on('exit', () => {
         if (this.worker === worker) {
           this.worker = undefined
-          this.workerText = undefined
+          this.workerTexts.clear()
         }
       })
-      this.workerText = undefined
+      this.workerTexts.clear()
       this.worker = worker
       return worker
     }
@@ -515,7 +537,7 @@ export class RegexExecutor {
       this.active = undefined
       this.activeCancel = undefined
       this.worker = undefined
-      this.workerText = undefined
+      this.workerTexts.clear()
       this.blockInfrastructure()
       job.reject(new RegexExecutionInfrastructureError(error instanceof Error ? error.message : String(error)))
       queueMicrotask(() => this.drain())
@@ -568,7 +590,7 @@ export class RegexExecutor {
       if (terminate) {
         if (this.worker === worker) {
           this.worker = undefined
-          this.workerText = undefined
+          this.workerTexts.clear()
         }
         const termination = Promise.resolve().then(async () => {
           await worker.terminate()
@@ -653,11 +675,22 @@ export class RegexExecutor {
     worker.once('exit', onExit)
     try {
       const { text, ...rest } = job.request
-      const request = this.workerText === text
-        ? { ...rest, cacheGeneration: this.cacheGeneration }
-        : { ...job.request, cacheGeneration: this.cacheGeneration }
+      const textKey = job.request.textKey ?? text
+      const known = this.workerTexts.has(textKey)
+      const request = known
+        ? { ...rest, cacheGeneration: this.cacheGeneration, textKey }
+        : { ...job.request, cacheGeneration: this.cacheGeneration, textKey }
       worker.postMessage({ id, request })
-      this.workerText = text
+      this.workerTexts.delete(textKey)
+      this.workerTexts.set(textKey, text.length)
+      let cachedUnits = [...this.workerTexts.values()].reduce((total, length) => total + length, 0)
+      while (this.workerTexts.size > 4 || cachedUnits > 2_000_000) {
+        const oldest = this.workerTexts.keys().next()
+        if (oldest.done || (oldest.value === textKey && this.workerTexts.size === 1))
+          break
+        cachedUnits -= this.workerTexts.get(oldest.value) ?? 0
+        this.workerTexts.delete(oldest.value)
+      }
     }
     catch (error) {
       this.blockInfrastructure()

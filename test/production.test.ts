@@ -125,6 +125,15 @@ describe('regex configuration', () => {
     expect(compiled.languages.has('newLanguage')).toBe(false)
   })
 
+  it('counts shared composite rules once under the global rule budget', () => {
+    const patterns = Array.from({ length: 1_000 }, (_, index) => `pattern-${index}`)
+    const compiled = compileConfig({
+      'a|b|c|d|e|f': { light: { red: patterns } },
+    })
+    for (const language of ['a', 'b', 'c', 'd', 'e', 'f'])
+      expect(getRulesForLanguage(compiled, language, false)).toHaveLength(1_000)
+  })
+
   it('caps global languages, rule entries, and retained styles', () => {
     const patterns = Array.from({ length: 1_000 }, (_, index) => `p${index}`)
     const raw = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [
@@ -511,12 +520,12 @@ describe('regex execution', () => {
       targets: [{ groupIndex: 1, styleId: 'red' }],
     }
     await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[1, 4]],
       artificialEnd: true,
       artificialStart: true,
-      coreEnd: 4,
-      coreStart: 1,
       scanStart: 0,
       text: '\nfooX',
+      textKey: 'boundary',
     }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ acceptedMatchCount: 0, ranges: [] })
     executor.dispose()
   })
@@ -532,12 +541,12 @@ describe('regex execution', () => {
       targets: [{ groupIndex: 1, styleId: 'red' }, { groupIndex: 2, styleId: 'blue' }],
     }
     await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[0, 2]],
       artificialEnd: false,
       artificialStart: false,
-      coreEnd: 2,
-      coreStart: 0,
       scanStart: 0,
       text: 'ab',
+      textKey: 'captures',
     }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({
       acceptedMatchCount: 1,
       ranges: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
@@ -873,6 +882,44 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('prioritizes accepted intervals over dense context matches', async () => {
+    const executor = new RegexExecutor(500)
+    const text = `${'x'.repeat(2_000)}TARGET`
+    const results = await executor.execute({
+      acceptedIntervals: [[2_000, text.length]],
+      ignores: [],
+      maxMatches: 1_000,
+      pattern: { source: 'x|TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text,
+      textKey: 'visible-priority',
+    })
+    expect(results).toEqual([{ spans: [[2_000, text.length]] }])
+    expect(results.truncated).toBeUndefined()
+    executor.dispose()
+  })
+
+  it('does not resend cached text when slice keys alternate', async () => {
+    const messages: any[] = []
+    class FakeWorker extends EventEmitter {
+      postMessage(message: any) {
+        messages.push(message)
+        queueMicrotask(() => this.emit('message', { id: message.id, results: [] }))
+      }
+
+      terminate = vi.fn(async () => 0)
+      unref = vi.fn()
+    }
+    const executor = new RegexExecutor(500, () => new FakeWorker() as any)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0] }
+    await executor.execute({ ...request, text: 'text-a', textKey: 'a' })
+    await executor.execute({ ...request, text: 'text-b', textKey: 'b' })
+    await executor.execute({ ...request, text: 'text-a', textKey: 'a' })
+    await executor.execute({ ...request, text: 'text-b', textKey: 'b' })
+    expect(messages.map(message => message.request.text)).toEqual(['text-a', 'text-b', undefined, undefined])
+    executor.dispose()
+  })
+
   it('sends unchanged slice text to a worker only once', async () => {
     const messages: any[] = []
     class FakeWorker extends EventEmitter {
@@ -894,7 +941,7 @@ describe('regex execution', () => {
     expect(messages[0].request.text).toBe('same text')
     expect(messages[1].request).not.toHaveProperty('text')
     expect(messages[2].request.text).toBe('different text')
-    expect(messages[3].request).not.toHaveProperty('text')
+    expect(messages[3].request.text).toBe('different text')
     expect(messages[3].request.cacheGeneration).toBe(messages[2].request.cacheGeneration + 1)
     executor.dispose()
   })
