@@ -6,6 +6,13 @@ const MAX_PATTERN_LENGTH = 1000
 export function normalizeFlags(flags = 'gm'): string {
   if (!VALID_FLAGS.test(flags))
     throw new Error(`Invalid regular expression flags: ${flags}`)
+  try {
+    const validationRegex = new RegExp('', flags)
+    void validationRegex
+  }
+  catch {
+    throw new Error(`Invalid regular expression flags: ${flags}`)
+  }
 
   const normalized = new Set(flags)
   normalized.add('g')

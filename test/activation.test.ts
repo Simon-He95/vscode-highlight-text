@@ -276,20 +276,20 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('omits an entire rule when its targets exceed the remaining profile layers', async () => {
-    const patterns = Array.from({ length: 91 }, (_, index) => `pattern-${index}`)
+  it('shares target layers across patterns from one style entry', async () => {
     configuration.rules = {
       plaintext: { light: {
-        red: { match: patterns, colors: Array.from({ length: 11 }, (_, index) => `color-${index}`) },
+        red: Array.from({ length: 301 }, (_, index) => `^pattern-${index}$`),
       } },
     }
-    const editor = createEditor('nothing', 'layer-limit')
+    const editor = createEditor('pattern-300', 'shared-layers')
     window.visibleTextEditors = [editor] as any
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     activate(context)
-    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(297)
-    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('profile limit was reached')))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true), 3_000)
+    expect(window.showWarningMessage).not.toHaveBeenCalledWith(expect.stringContaining('profile limit was reached'))
     disposeContext(context)
   })
 
@@ -417,7 +417,7 @@ describe('extension activation orchestration', () => {
     activate(context)
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Main pattern exceeded 1000 matches')))
     const redTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).filter(type => type.options.color === 'red')
-    expect(redTypes).toHaveLength(2)
+    expect(redTypes).toHaveLength(1)
     await waitFor(() => expect(redTypes.some(type => editor.setDecorations.mock.calls.some(
       ([appliedType, ranges]) => appliedType === type && ranges.length > 0,
     ))).toBe(true))

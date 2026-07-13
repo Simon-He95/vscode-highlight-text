@@ -47,6 +47,8 @@ describe('regex configuration', () => {
     expect(normalizeFlags('m')).toBe('mgd')
     expect(normalizeFlags('dg')).toBe('dg')
     expect(() => normalizeFlags('z')).toThrow('Invalid regular expression flags: z')
+    expect(() => normalizeFlags('gg')).toThrow('Invalid regular expression flags: gg')
+    expect(() => normalizeFlags('uv')).toThrow('Invalid regular expression flags: uv')
     expect(() => compilePattern(['(?=foo)', 'm'])).not.toThrow()
     expect(() => compilePattern(['(?<=foo)\\w+', 'm'])).not.toThrow()
     expect(() => compilePattern(['(?<name>foo)', 'm'])).not.toThrow()
@@ -294,6 +296,8 @@ describe('regex configuration', () => {
     const windowsFilter = createExcludeFilter(['C:\\Repo\\dist\\**'])
     expect(windowsFilter('/c:/repo/dist/index.js')).toBe(false)
     expect(windowsFilter('c:\\REPO\\src\\index.js')).toBe(true)
+    expect(createExcludeFilter(['Build/**'])('C:\\Repo\\Build\\index.js')).toBe(false)
+    expect(createExcludeFilter(['BUILD/**'])('\\\\Server\\Share\\build\\index.js')).toBe(false)
   })
 
   it('bounds exclude pattern count and length before matching', () => {
@@ -805,6 +809,24 @@ describe('regex execution', () => {
     await second
     expect(firstDuration).toBe(4_000)
     expect(secondDuration).toBe(1)
+    executor.dispose()
+  })
+
+  it('settles and drains when an execution callback throws', async () => {
+    const worker = new EventEmitter() as any
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.terminate = vi.fn(async () => 0)
+    worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, results: [{ spans: [[0, 1]] }] })))
+    const executor = new RegexExecutor(500, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    const first = executor.execute(request, undefined, () => {
+      throw new Error('metrics failed')
+    })
+    const second = executor.execute(request)
+    await expect(first).resolves.toEqual([{ spans: [[0, 1]] }])
+    await expect(second).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(executor.pendingCount).toBe(0)
     executor.dispose()
   })
 

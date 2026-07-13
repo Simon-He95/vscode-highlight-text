@@ -423,7 +423,11 @@ export function createExcludeFilter(value: unknown): (path: string) => boolean {
           const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
           const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
           try {
-            return [{ matcher: picomatch(normalized, { dot: true }), negated }]
+            return [{
+              caseSensitiveMatcher: picomatch(normalized, { dot: true }),
+              caseInsensitiveMatcher: picomatch(normalized, { dot: true, nocase: true }),
+              negated,
+            }]
           }
           catch {
             return []
@@ -436,9 +440,11 @@ export function createExcludeFilter(value: unknown): (path: string) => boolean {
     const cached = cache.get(normalizedPath)
     if (cached !== undefined)
       return cached
+    const windowsPath = /^[a-z]:\//i.test(normalizedPath) || normalizedPath.startsWith('//')
     let included = true
     for (const pattern of patterns) {
-      if (pattern.matcher(normalizedPath))
+      const matcher = windowsPath ? pattern.caseInsensitiveMatcher : pattern.caseSensitiveMatcher
+      if (matcher(normalizedPath))
         included = pattern.negated
     }
     if (cache.size >= MAX_EXCLUDE_CACHE_ENTRIES)

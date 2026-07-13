@@ -493,7 +493,12 @@ export class RegexExecutor {
         const executionMs = Date.now() - executionStartedAt
         if (error)
           Object.defineProperty(error, 'executionMs', { configurable: true, value: executionMs })
-        job.onExecutionComplete?.(executionMs)
+        try {
+          job.onExecutionComplete?.(executionMs)
+        }
+        catch {
+          // Instrumentation callbacks must not affect executor settlement.
+        }
       }
       if (terminate) {
         if (this.worker === worker) {

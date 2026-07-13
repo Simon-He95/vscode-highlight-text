@@ -232,14 +232,22 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
   const warnings: string[] = []
   const sourceRules = getRulesForLanguage(config, languageId, dark, warnings)
   const priorityStyleIds: Array<{ id: string, styleId: string }> = []
-  const rules = sourceRules.flatMap((rule, ruleIndex) => {
-    if (priorityStyleIds.length + rule.targets.length > MAX_PROFILE_LAYERS) {
+  const layerIds = new Map<string, string>()
+  const rules = sourceRules.flatMap((rule) => {
+    const targetKeys = rule.targets.map((target, targetIndex) => JSON.stringify([rule.context, targetIndex, target.styleId]))
+    const newLayerCount = new Set(targetKeys.filter(key => !layerIds.has(key))).size
+    if (priorityStyleIds.length + newLayerCount > MAX_PROFILE_LAYERS) {
       warnings.push(`${rule.context} was omitted because the ${MAX_PROFILE_LAYERS}-layer profile limit was reached`)
       return []
     }
     const targets = rule.targets.map((target, targetIndex) => {
-      const decorationId = `d${ruleIndex}:${targetIndex}`
-      priorityStyleIds.push({ id: decorationId, styleId: target.styleId })
+      const layerKey = targetKeys[targetIndex]
+      let decorationId = layerIds.get(layerKey)
+      if (!decorationId) {
+        decorationId = `d${priorityStyleIds.length}`
+        layerIds.set(layerKey, decorationId)
+        priorityStyleIds.push({ id: decorationId, styleId: target.styleId })
+      }
       return { ...target, decorationId }
     })
     return [{ ...rule, targets }]
