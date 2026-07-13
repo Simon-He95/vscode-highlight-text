@@ -6,7 +6,7 @@ import { window } from 'vscode'
 import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
-import { nextCodePointOffset, previousCodePointOffset, scanRule } from '../src/index'
+import { getDocumentCacheIdentity, nextCodePointOffset, previousCodePointOffset, scanRule } from '../src/index'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, isRegexExecutionBudgetError, RegexExecutor } from '../src/regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
@@ -402,6 +402,18 @@ describe('regex configuration', () => {
 })
 
 describe('scan boundaries', () => {
+  it('uses complete URI and document instance identity for worker text keys', () => {
+    const createDocument = (query: string) => ({
+      uri: { authority: '', fragment: '', path: '/same/file.ts', query, scheme: 'git' },
+    }) as any
+    const first = createDocument('ref=HEAD')
+    const revision = createDocument('ref=parent')
+    const reopened = createDocument('ref=HEAD')
+    expect(getDocumentCacheIdentity(first)).toBe(getDocumentCacheIdentity(first))
+    expect(getDocumentCacheIdentity(first)).not.toBe(getDocumentCacheIdentity(revision))
+    expect(getDocumentCacheIdentity(first)).not.toBe(getDocumentCacheIdentity(reopened))
+  })
+
   it('extends scan context without splitting UTF-16 surrogate pairs', () => {
     const text = 'a😀b'
     const document = {
@@ -527,6 +539,35 @@ describe('regex execution', () => {
       text: '\nfooX',
       textKey: 'boundary',
     }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ acceptedMatchCount: 0, ranges: [] })
+    executor.dispose()
+  })
+
+  it('keeps ordinary matches protected by artificial boundary guards', async () => {
+    const executor = new RegexExecutor(500)
+    const rule = {
+      context: 'test',
+      id: 'test',
+      layerContextId: 'test',
+      ignores: [],
+      pattern: { source: 'foo', flags: 'gd' },
+      targets: [{ groupIndex: 0, styleId: 'red' }],
+    }
+    await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[1, 4]],
+      artificialEnd: true,
+      artificialStart: true,
+      scanStart: 0,
+      text: 'XfooX',
+      textKey: 'left-guard',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ ranges: [{ start: 1, end: 4 }] })
+    await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[0, 3]],
+      artificialEnd: true,
+      artificialStart: false,
+      scanStart: 0,
+      text: 'fooX',
+      textKey: 'right-guard',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ ranges: [{ start: 0, end: 3 }] })
     executor.dispose()
   })
 
@@ -899,6 +940,20 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('enforces an independent raw iteration limit for skipped candidates', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      acceptedIntervals: [],
+      ignores: [],
+      maxMatches: 1_000,
+      pattern: { source: '(?=x)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'x'.repeat(250_001),
+      textKey: 'raw-limit',
+    })).rejects.toThrow('exceeded 250000 raw iterations')
+    executor.dispose()
+  })
+
   it('does not resend cached text when slice keys alternate', async () => {
     const messages: any[] = []
     class FakeWorker extends EventEmitter {
@@ -938,11 +993,13 @@ describe('regex execution', () => {
     await executor.execute({ ...request, text: 'different text' })
     executor.resetCache()
     await executor.execute({ ...request, text: 'different text' })
-    expect(messages[0].request.text).toBe('same text')
-    expect(messages[1].request).not.toHaveProperty('text')
-    expect(messages[2].request.text).toBe('different text')
-    expect(messages[3].request.text).toBe('different text')
-    expect(messages[3].request.cacheGeneration).toBe(messages[2].request.cacheGeneration + 1)
+    const requests = messages.filter(message => message.request)
+    expect(requests[0].request.text).toBe('same text')
+    expect(requests[1].request).not.toHaveProperty('text')
+    expect(requests[2].request.text).toBe('different text')
+    expect(messages).toContainEqual({ reset: { cacheGeneration: requests[2].request.cacheGeneration + 1 } })
+    expect(requests[3].request.text).toBe('different text')
+    expect(requests[3].request.cacheGeneration).toBe(requests[2].request.cacheGeneration + 1)
     executor.dispose()
   })
 

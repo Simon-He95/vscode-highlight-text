@@ -26,6 +26,21 @@ const MAX_REMEMBERED_WARNINGS = 100
 const OVERSCAN_LINES = 20
 const MAX_VUE_LANGUAGE_DETECTION_SIZE = 300_000
 const UPDATE_DELAY = 100
+const documentInstanceIds = new WeakMap<TextDocument, number>()
+let nextDocumentInstanceId = 0
+
+export function getDocumentCacheIdentity(document: TextDocument): string {
+  let instanceId = documentInstanceIds.get(document)
+  if (instanceId === undefined) {
+    instanceId = ++nextDocumentInstanceId
+    documentInstanceIds.set(document, instanceId)
+  }
+  const uri = document.uri
+  const serializedUri = typeof uri.toString === 'function' && uri.toString !== Object.prototype.toString
+    ? uri.toString(true)
+    : JSON.stringify([uri.scheme, uri.authority, uri.path, uri.query, uri.fragment])
+  return JSON.stringify([serializedUri, instanceId])
+}
 
 interface RuleSnapshot {
   documentVersion: number
@@ -152,6 +167,10 @@ function getScanSlices(editor: TextEditor): ScanPlan {
       if (probe.length === 2 && probe.charCodeAt(0) >= 0xD800 && probe.charCodeAt(0) <= 0xDBFF && probe.charCodeAt(1) >= 0xDC00 && probe.charCodeAt(1) <= 0xDFFF)
         scanEnd--
     }
+    if (scanStart === context.visible.start && scanStart > 0)
+      scanStart = previousCodePointOffset(document, scanStart)
+    if (scanEnd === context.visible.end && scanEnd < documentEnd)
+      scanEnd = nextCodePointOffset(document, scanEnd, documentEnd)
     return {
       acceptedIntervals: [[context.visible.start - scanStart, context.visible.end - scanStart] as [number, number]],
       artificialEnd: scanEnd < documentEnd,
@@ -163,7 +182,7 @@ function getScanSlices(editor: TextEditor): ScanPlan {
   const slices = planned.map(({ scanEnd, ...slice }, index) => ({
     ...slice,
     text: document.getText(new Range(document.positionAt(slice.scanStart), document.positionAt(scanEnd))),
-    textKey: JSON.stringify([getDocumentPath(document), document.version, scanKey, index, slice.scanStart, scanEnd]),
+    textKey: JSON.stringify([getDocumentCacheIdentity(document), document.version, scanKey, index, slice.scanStart, scanEnd]),
   }))
   return { complete: true, scanKey, slices }
 }

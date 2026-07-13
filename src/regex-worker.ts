@@ -58,12 +58,19 @@ function advanceStringIndex(text, index, unicode) {
   return second >= 0xDC00 && second <= 0xDFFF ? index + 2 : index + 1
 }
 
-function collect(regex, text, limit, onMatch, maxRetries = 0) {
+function collect(regex, text, limit, onMatch, maxRetries = 0, maxRawIterations = limit) {
   regex.lastIndex = 0
   let count = 0
   let retries = 0
-  let match
-  while (count < limit && retries <= maxRetries && (match = regex.exec(text)) !== null) {
+  let rawIterations = 0
+  let exhausted = false
+  while (count < limit && retries <= maxRetries && rawIterations < maxRawIterations) {
+    const match = regex.exec(text)
+    if (match === null) {
+      exhausted = true
+      break
+    }
+    rawIterations++
     const outcome = onMatch(match)
     if (outcome === 'retry')
       retries++
@@ -71,14 +78,23 @@ function collect(regex, text, limit, onMatch, maxRetries = 0) {
       count++
     if (match.index === regex.lastIndex)
       regex.lastIndex = advanceStringIndex(text, regex.lastIndex, regex.unicode || regex.unicodeSets)
-    if (outcome === false)
+    if (outcome === false) {
+      exhausted = true
       break
+    }
   }
-  const hasMore = (count >= limit || retries > maxRetries) && regex.exec(text) !== null
-  return { count, retryTruncated: retries > maxRetries && hasMore, truncated: count >= limit && hasMore }
+  const rawTruncated = !exhausted && rawIterations >= maxRawIterations
+  const hasMore = !rawTruncated && (count >= limit || retries > maxRetries) && regex.exec(text) !== null
+  return { count, rawTruncated, retryTruncated: retries > maxRetries && hasMore, truncated: count >= limit && hasMore }
 }
 
-parentPort.on('message', ({ id, request }) => {
+parentPort.on('message', ({ id, request, reset }) => {
+  if (reset) {
+    cachedGeneration = reset.cacheGeneration
+    textCache = new Map()
+    cachedTextUnits = 0
+    return
+  }
   parentPort.postMessage({ id, started: true })
   try {
     if (request.cacheGeneration !== cachedGeneration) {
@@ -127,8 +143,8 @@ parentPort.on('message', ({ id, request }) => {
             }
             ignored.push(span)
           }
-        })
-        if (collected.truncated)
+        }, 0, maxIgnoreMatches + 1)
+        if (collected.truncated || collected.rawTruncated)
           {
           const error = new Error('Ignore pattern exceeded ' + maxIgnoreMatches + ' matches')
           error.code = 'IGNORE_LIMIT'
@@ -230,6 +246,7 @@ parentPort.on('message', ({ id, request }) => {
     let spanCount = 0
     const results = []
     const rawMatchLimit = Math.max(request.maxMatches * 10, 10000)
+    const maxRawIterations = 250000
     const collected = collect(regex, hasIgnores ? maskedText : text, rawMatchLimit, (match) => {
       const fullSpan = match.indices && match.indices[0]
       if (!fullSpan)
@@ -320,7 +337,12 @@ parentPort.on('message', ({ id, request }) => {
         spanCount += validSpanCount
         results.push(request.includeFullSpan ? { fullSpan: acceptedFullSpan, spans: acceptedSpans } : { spans: acceptedSpans })
       }
-    }, hasIgnores ? 10000 : 0)
+    }, hasIgnores ? 10000 : 0, maxRawIterations)
+    if (collected.rawTruncated) {
+      const error = new Error('Main pattern exceeded ' + maxRawIterations + ' raw iterations')
+      error.code = 'MATCH_LIMIT'
+      throw error
+    }
     if (collected.retryTruncated) {
       const error = new Error('Main pattern exceeded the masked retry budget')
       error.code = 'MATCH_LIMIT'
@@ -426,6 +448,13 @@ export class RegexExecutor {
   resetCache(): void {
     this.cacheGeneration++
     this.workerTexts.clear()
+    try {
+      this.worker?.postMessage({ reset: { cacheGeneration: this.cacheGeneration } })
+    }
+    catch {
+      void this.worker?.terminate()
+      this.worker = undefined
+    }
   }
 
   execute(
