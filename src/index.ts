@@ -65,6 +65,13 @@ interface ScanSession {
   scannedSnapshots: Map<string, Map<string, VscodeRange[]>>
 }
 
+export function resetCurrentRuleState(session: Pick<ScanSession, 'candidateKeys' | 'candidateSnapshot' | 'currentRuleMatchCount' | 'nextSliceIndex'>): void {
+  session.candidateKeys = new Set()
+  session.candidateSnapshot = new Map()
+  session.currentRuleMatchCount = 0
+  session.nextSliceIndex = 0
+}
+
 interface ScanPlan {
   complete: boolean
   scanKey: string
@@ -573,8 +580,8 @@ export function activate(context: ExtensionContext): void {
       if (failures.isDisabled(document, rule.id) || structuralFailure.ruleIds.has(rule.id)) {
         session.failedRuleIds.add(rule.id)
         acceptPreviousSnapshot(rule.id)
+        resetCurrentRuleState(session)
         session.nextRuleIndex++
-        session.nextSliceIndex = 0
         continue
       }
 
@@ -714,10 +721,7 @@ export function activate(context: ExtensionContext): void {
           }
         }
       }
-      session.candidateKeys = new Set()
-      session.candidateSnapshot = new Map()
-      session.currentRuleMatchCount = 0
-      session.nextSliceIndex = 0
+      resetCurrentRuleState(session)
       session.nextRuleIndex++
     }
 
@@ -727,9 +731,7 @@ export function activate(context: ExtensionContext): void {
         acceptPreviousSnapshot(rules[index].id)
       }
       session.nextRuleIndex = rules.length
-      session.nextSliceIndex = 0
-      session.candidateKeys = new Set()
-      session.candidateSnapshot = new Map()
+      resetCurrentRuleState(session)
       warnOnce(`Highlight scan session limit reached in ${document.uri.fsPath}; remaining rules were skipped`)
     }
 

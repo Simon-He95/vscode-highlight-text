@@ -42,8 +42,14 @@ export class DecorationManager {
     try {
       // Keep high-to-low creation order: current VS Code prepends decoration CSS rules,
       // so earlier-created, higher-priority layers end up later in the cascade.
-      for (const { id, styleId } of layers)
-        types.set(id, window.createTextEditorDecorationType(this.styles.get(styleId)!))
+      for (const { id, styleId } of layers) {
+        try {
+          types.set(id, window.createTextEditorDecorationType(this.styles.get(styleId)!))
+        }
+        catch (error) {
+          throw new Error(`Failed to create decoration layer ${id} (style ${styleId}): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       this.typeCount += types.size
       globallyAllocatedDecorationTypes += types.size
       this.profiles.set(profileId, { editors: new Set(), types })

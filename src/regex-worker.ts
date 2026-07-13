@@ -76,7 +76,7 @@ function collect(regex, text, limit, onMatch, maxRetries = 0, maxRawIterations =
     const outcome = onMatch(match)
     if (outcome === 'retry')
       retries++
-    else if (outcome !== 'skip')
+    else if (outcome !== 'skip' && outcome !== 'advance')
       count++
     if (match.index === regex.lastIndex)
       regex.lastIndex = advanceStringIndex(text, regex.lastIndex, regex.unicode || regex.unicodeSets)
@@ -257,6 +257,13 @@ parentPort.on('message', ({ id, request, reset }) => {
       const fullSpan = match.indices && match.indices[0]
       if (!fullSpan)
         return
+      if (
+        (request.artificialStart && fullSpan[0] === 0)
+        || (request.artificialEnd && fullSpan[1] === text.length)
+      ) {
+        regex.lastIndex = advanceStringIndex(text, fullSpan[0], regex.unicode || regex.unicodeSets)
+        return 'advance'
+      }
       let acceptedFullSpan = fullSpan
       let acceptedSpans = getSpans(match)
       const overlapping = findOverlappingIgnored(fullSpan)

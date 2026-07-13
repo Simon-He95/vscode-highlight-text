@@ -15,7 +15,7 @@ The Vitest suite imports production modules directly and covers:
 - sticky, explicit-empty, and document-relative `^`/`$` slice-boundary semantics;
 - engine-provided full-match/capture indices, legacy first-participating capture semantics including empty-group stopping, and artificial slice-boundary rejection;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;
-- document-scoped rule cooldowns, session-union-deduplicated, document-versioned rule snapshots and editor-local structural-failure caching, resumable scan sessions with cumulative time/job/continuation limits and chunk-local timeout yielding, unique composite-rule-aware global language-key/language/rule/style/target/ignore/span limits, and deterministic first-match truncation, explicit skipped-rule handling, and atomic per-rule budgets;
+- document-scoped rule cooldowns, session-union-deduplicated, document-versioned rule snapshots and editor-local structural-failure caching, resumable scan sessions with cumulative time/job/continuation limits and chunk-local timeout yielding, unique composite-rule-aware global language-key/language/rule/style/target/ignore/span limits, and deterministic first-match truncation, atomic partial-rule reset, explicit skipped-rule handling, and atomic per-rule budgets;
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;

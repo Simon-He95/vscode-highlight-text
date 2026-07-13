@@ -6,7 +6,7 @@ import { window } from 'vscode'
 import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
-import { getDocumentCacheIdentity, nextCodePointOffset, previousCodePointOffset, scanRule } from '../src/index'
+import { getDocumentCacheIdentity, nextCodePointOffset, previousCodePointOffset, resetCurrentRuleState, scanRule } from '../src/index'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, isRegexExecutionBudgetError, RegexExecutor } from '../src/regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
@@ -401,6 +401,22 @@ describe('regex configuration', () => {
   })
 })
 
+describe('scan session state', () => {
+  it('clears partial candidates before advancing a skipped rule', () => {
+    const session = {
+      candidateKeys: new Set(['old']),
+      candidateSnapshot: new Map([['old', [range(0, 1)]]]),
+      currentRuleMatchCount: 7,
+      nextSliceIndex: 2,
+    }
+    resetCurrentRuleState(session)
+    expect(session.candidateKeys.size).toBe(0)
+    expect(session.candidateSnapshot.size).toBe(0)
+    expect(session.currentRuleMatchCount).toBe(0)
+    expect(session.nextSliceIndex).toBe(0)
+  })
+})
+
 describe('scan boundaries', () => {
   it('uses complete URI and document instance identity for worker text keys', () => {
     const createDocument = (query: string) => ({
@@ -568,6 +584,21 @@ describe('regex execution', () => {
       text: 'fooX',
       textKey: 'right-guard',
     }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ ranges: [{ start: 0, end: 3 }] })
+    executor.dispose()
+  })
+
+  it('rejects artificial-boundary matches before match-budget accounting', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      acceptedIntervals: [[0, 17]],
+      artificialStart: true,
+      ignores: [],
+      maxMatches: 1,
+      pattern: { source: '^foo.*(TARGET)|(TARGET)', flags: 'gd' },
+      targetGroups: [1, 2],
+      text: 'foo filler TARGET',
+      textKey: 'boundary-budget',
+    })).resolves.toEqual([{ spans: [undefined, [11, 17]] }])
     executor.dispose()
   })
 
