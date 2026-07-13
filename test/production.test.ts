@@ -145,6 +145,29 @@ describe('regex configuration', () => {
     expect(compiled.warnings.length).toBeLessThanOrEqual(100)
   })
 
+  it('rejects an excessively deep style without recursing in serialization', () => {
+    let before: Record<string, unknown> = { contentText: 'x' }
+    for (let depth = 0; depth < 20; depth++)
+      before = { nested: before }
+    const compiled = compileConfig({ plaintext: { light: { red: { before, match: ['foo'] } } } })
+    expect(getRulesForLanguage(compiled, 'plaintext', false)).toEqual([])
+    expect(compiled.styles).toHaveLength(0)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Style exceeds the complexity limit'))
+  })
+
+  it('bounds top-level style copying, key size, and matchCss styles', () => {
+    const wide = Object.fromEntries(Array.from({ length: 501 }, (_, index) => [`p${index}`, index]))
+    expect(() => normalizeStyle(wide)).toThrow('Style exceeds the property limit')
+    expect(() => normalizeStyle({ ['k'.repeat(20_001)]: true })).toThrow('Style exceeds the string-size limit')
+
+    const compiled = compileConfig({
+      plaintext: { light: { red: { match: ['(foo)'], matchCss: [wide] } } },
+    })
+    expect(getRulesForLanguage(compiled, 'plaintext', false)).toEqual([])
+    expect(compiled.styles.size).toBe(0)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Style exceeds the property limit'))
+  })
+
   it('rolls back canonical style IDs and cannot bypass the global style cap', () => {
     const light: Record<string, unknown> = {}
     for (let rule = 0; rule < 11; rule++) {
@@ -641,6 +664,38 @@ describe('regex execution', () => {
       targetGroups: [0],
       text: 'fooXXXbar',
     })).resolves.toEqual([{ spans: [[1, 3]] }])
+    executor.dispose()
+  })
+
+  it('preserves lookbehind context while probing before an ignored interval', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'IGNORE', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'a.*TARGET|(?<=aa x)b', flags: 'gd' },
+      targetGroups: [0],
+      text: 'aa xbIGNORE TARGET',
+    })).resolves.toEqual([{ spans: [[4, 5]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'IGNORE', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '.*$', flags: 'gd' },
+      targetGroups: [0],
+      text: 'aIGNORE',
+    })).resolves.toEqual([])
+    executor.dispose()
+  })
+
+  it('jumps across a long ignored prefix without exhausting raw candidates', async () => {
+    const executor = new RegexExecutor(500)
+    const prefix = 'a'.repeat(10_001)
+    await expect(executor.execute({
+      ignores: [{ source: 'IGNORE', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '.*TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${prefix}IGNORE TARGET`,
+    })).resolves.toEqual([{ spans: [[prefix.length + 6, prefix.length + 13]] }])
     executor.dispose()
   })
 

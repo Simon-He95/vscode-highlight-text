@@ -52,19 +52,24 @@ function advanceStringIndex(text, index, unicode) {
   return second >= 0xDC00 && second <= 0xDFFF ? index + 2 : index + 1
 }
 
-function collect(regex, text, limit, onMatch) {
+function collect(regex, text, limit, onMatch, maxRetries = 0) {
   regex.lastIndex = 0
   let count = 0
+  let retries = 0
   let match
-  while (count < limit && (match = regex.exec(text)) !== null) {
-    const shouldContinue = onMatch(match)
-    count++
+  while (count < limit && retries <= maxRetries && (match = regex.exec(text)) !== null) {
+    const outcome = onMatch(match)
+    if (outcome === 'retry')
+      retries++
+    else
+      count++
     if (match.index === regex.lastIndex)
       regex.lastIndex = advanceStringIndex(text, regex.lastIndex, regex.unicode || regex.unicodeSets)
-    if (shouldContinue === false)
+    if (outcome === false)
       break
   }
-  return { count, truncated: count === limit && regex.exec(text) !== null }
+  const hasMore = (count >= limit || retries > maxRetries) && regex.exec(text) !== null
+  return { count, retryTruncated: retries > maxRetries && hasMore, truncated: count >= limit && hasMore }
 }
 
 parentPort.on('message', ({ id, request }) => {
@@ -197,6 +202,8 @@ parentPort.on('message', ({ id, request }) => {
     const regex = new RegExp(request.pattern.source, request.pattern.flags)
     const stickyFlags = request.pattern.flags.replace(/g/g, '').replace(/y/g, '') + 'y'
     const originalAtCandidate = hasIgnores ? new RegExp(request.pattern.source, stickyFlags) : undefined
+    const originalSearch = hasIgnores ? new RegExp(request.pattern.source, request.pattern.flags) : undefined
+    const preIntervalSearch = hasIgnores ? new RegExp(request.pattern.source, request.pattern.flags) : undefined
     const maxSpans = request.maxSpans ?? 10000
     let spanCount = 0
     const results = []
@@ -224,10 +231,47 @@ parentPort.on('message', ({ id, request }) => {
         }
         else {
           const nextIndex = advanceStringIndex(text, fullSpan[0], regex.unicode || regex.unicodeSets)
-          regex.lastIndex = overlapping && fullSpan[0] >= overlapping[0]
-            ? Math.max(overlapping[1], nextIndex)
-            : nextIndex
-          return
+          if (overlapping && fullSpan[0] < overlapping[0] && originalSearch) {
+            originalSearch.lastIndex = nextIndex
+            const alternative = originalSearch.exec(text)
+            const alternativeSpan = alternative && alternative.indices && alternative.indices[0]
+            if (alternativeSpan && alternativeSpan[1] <= overlapping[0]) {
+              regex.lastIndex = alternativeSpan[0]
+            }
+            else if (preIntervalSearch) {
+              const prefixText = text.slice(0, overlapping[0])
+              preIntervalSearch.lastIndex = nextIndex
+              let prefixStart
+              for (let attempt = 0; attempt < 100; attempt++) {
+                const prefixAlternative = preIntervalSearch.exec(prefixText)
+                const prefixSpan = prefixAlternative && prefixAlternative.indices && prefixAlternative.indices[0]
+                if (!prefixSpan)
+                  break
+                originalAtCandidate.lastIndex = prefixSpan[0]
+                const verified = originalAtCandidate.exec(text)
+                const verifiedSpan = verified && verified.indices && verified.indices[0]
+                const verifiedSpans = verified ? getSpans(verified) : []
+                if (
+                  verifiedSpan
+                  && verifiedSpan[1] <= overlapping[0]
+                  && !overlapsIgnored(verifiedSpan)
+                  && !verifiedSpans.some(span => span && overlapsIgnored(span))
+                ) {
+                  prefixStart = prefixSpan[0]
+                  break
+                }
+                preIntervalSearch.lastIndex = advanceStringIndex(prefixText, prefixSpan[0], preIntervalSearch.unicode || preIntervalSearch.unicodeSets)
+              }
+              regex.lastIndex = prefixStart ?? overlapping[1]
+            }
+            else {
+              regex.lastIndex = overlapping[1]
+            }
+          }
+          else {
+            regex.lastIndex = overlapping ? Math.max(overlapping[1], nextIndex) : nextIndex
+          }
+          return 'retry'
         }
       }
       else if (overlapping || acceptedSpans.some(span => span && overlapsIgnored(span))) {
@@ -248,7 +292,12 @@ parentPort.on('message', ({ id, request }) => {
         spanCount += validSpanCount
         results.push(request.includeFullSpan ? { fullSpan: acceptedFullSpan, spans: acceptedSpans } : { spans: acceptedSpans })
       }
-    })
+    }, hasIgnores ? 10000 : 0)
+    if (collected.retryTruncated) {
+      const error = new Error('Main pattern exceeded the masked retry budget')
+      error.code = 'MATCH_LIMIT'
+      throw error
+    }
     if (collected.truncated) {
       const error = new Error('Main pattern exceeded ' + rawMatchLimit + ' raw matches')
       error.code = 'MATCH_LIMIT'

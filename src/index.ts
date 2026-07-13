@@ -221,14 +221,7 @@ export function getRuleLanguageId(document: TextDocument): string {
   return result
 }
 
-function getRuleSelection(config: CompiledConfig, document: TextDocument) {
-  const dark = isDarkTheme()
-  const vueRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vue', dark) : []
-  const vueTsxRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vuetsx', dark) : []
-  const languageId = document.languageId === 'vue'
-    && (vueRules.length !== vueTsxRules.length || vueRules.some((rule, index) => rule !== vueTsxRules[index]))
-    ? getRuleLanguageId(document)
-    : document.languageId
+function buildRuleSelection(config: CompiledConfig, languageId: string, dark: boolean) {
   const warnings: string[] = []
   const sourceRules = getRulesForLanguage(config, languageId, dark, warnings)
   const priorityStyleIds: Array<{ id: string, styleId: string }> = []
@@ -260,6 +253,27 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
   }
 }
 
+const ruleSelectionCache = new WeakMap<CompiledConfig, Map<string, ReturnType<typeof buildRuleSelection>>>()
+
+function getRuleSelection(config: CompiledConfig, document: TextDocument) {
+  const dark = isDarkTheme()
+  const vueRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vue', dark) : []
+  const vueTsxRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vuetsx', dark) : []
+  const languageId = document.languageId === 'vue'
+    && (vueRules.length !== vueTsxRules.length || vueRules.some((rule, index) => rule !== vueTsxRules[index]))
+    ? getRuleLanguageId(document)
+    : document.languageId
+  const key = `${languageId}:${dark ? 'dark' : 'light'}`
+  const cache = ruleSelectionCache.get(config) ?? new Map<string, ReturnType<typeof buildRuleSelection>>()
+  ruleSelectionCache.set(config, cache)
+  const cached = cache.get(key)
+  if (cached)
+    return cached
+  const selection = buildRuleSelection(config, languageId, dark)
+  cache.set(key, selection)
+  return selection
+}
+
 export function activate(context: ExtensionContext): void {
   let disposed = false
   let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
@@ -280,6 +294,7 @@ export function activate(context: ExtensionContext): void {
   }
   let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
   let scanSessions = new WeakMap<TextEditor, ScanSession>()
+  let structuralFailures = new WeakMap<TextDocument, { key: string, ruleIds: Set<string> }>()
   const executor = new RegexExecutor()
   const getExecutor = (_editor: TextEditor) => executor
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
@@ -353,6 +368,11 @@ export function activate(context: ExtensionContext): void {
     }
 
     const sessionKey = JSON.stringify([documentVersion, scanPlan.scanKey, profileId])
+    let structuralFailure = structuralFailures.get(document)
+    if (!structuralFailure || structuralFailure.key !== sessionKey) {
+      structuralFailure = { key: sessionKey, ruleIds: new Set() }
+      structuralFailures.set(document, structuralFailure)
+    }
     let session = scanSessions.get(editor)
     if (!session || session.key !== sessionKey) {
       session = {
@@ -392,11 +412,15 @@ export function activate(context: ExtensionContext): void {
         break
       }
       if (budget.exhausted) {
+        const skipped = rules.length - session.nextRuleIndex
+        for (let index = session.nextRuleIndex; index < rules.length; index++)
+          session.failedRuleIds.add(rules[index].id)
         session.nextRuleIndex = rules.length
+        warnOnce(`Highlight range budget was exhausted in ${document.uri.fsPath}; ${skipped} remaining rules were skipped`)
         break
       }
       const rule = rules[session.nextRuleIndex]
-      if (failures.isDisabled(document, rule.id)) {
+      if (failures.isDisabled(document, rule.id) || structuralFailure.ruleIds.has(rule.id)) {
         session.failedRuleIds.add(rule.id)
         session.nextRuleIndex++
         session.nextSliceIndex = 0
@@ -479,6 +503,7 @@ export function activate(context: ExtensionContext): void {
           }
           else if (isRegexExecutionLimitError(error)) {
             session.failedRuleIds.add(rule.id)
+            structuralFailure.ruleIds.add(rule.id)
             warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
           }
           else {
@@ -700,6 +725,7 @@ export function activate(context: ExtensionContext): void {
       shouldProcess = nextFilter
       ruleSnapshots = new WeakMap()
       scanSessions = new WeakMap()
+      structuralFailures = new WeakMap()
       failures.clear()
       executor.resetCache()
       warned.clear()

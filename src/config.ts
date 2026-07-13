@@ -16,6 +16,10 @@ const MAX_TARGETS_PER_RULE = 100
 const MAX_TOTAL_RULES = 5000
 const MAX_TOTAL_STYLES = 1000
 const MAX_WARNINGS = 100
+const MAX_STYLE_DEPTH = 12
+const MAX_STYLE_NODES = 500
+const MAX_STYLE_PROPERTIES = 500
+const MAX_STYLE_STRING_UNITS = 20_000
 const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
 const STYLE_IDS = new WeakMap<CompiledConfig, Map<string, string>>()
 const LANGUAGE_ALIASES = new Map<string, readonly string[]>([
@@ -67,14 +71,74 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(value)
 }
 
-export function normalizeStyle(raw: Record<string, unknown>): DecorationRenderOptions {
-  const style: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(raw)) {
-    if (!STYLE_ONLY_FIELDS.has(key))
-      style[key] = value
+function validateStyleComplexity(style: Record<string, unknown>): void {
+  const pending: Array<{ depth: number, value: unknown }> = [{ depth: 0, value: style }]
+  const seen = new WeakSet<object>()
+  let nodes = 0
+  let properties = 0
+  let stringUnits = 0
+  while (pending.length) {
+    const { depth, value } = pending.pop()!
+    nodes++
+    if (nodes > MAX_STYLE_NODES || depth > MAX_STYLE_DEPTH)
+      throw new Error('Style exceeds the complexity limit')
+    if (typeof value === 'string') {
+      stringUnits += value.length
+      if (stringUnits > MAX_STYLE_STRING_UNITS)
+        throw new Error('Style exceeds the string-size limit')
+      continue
+    }
+    if (!value || typeof value !== 'object')
+      continue
+    if (seen.has(value))
+      throw new Error('Style contains a circular reference')
+    seen.add(value)
+    if (Array.isArray(value)) {
+      properties += value.length
+      if (properties > MAX_STYLE_PROPERTIES)
+        throw new Error('Style exceeds the property limit')
+      for (let index = 0; index < value.length; index++)
+        pending.push({ depth: depth + 1, value: value[index] })
+      continue
+    }
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key))
+        continue
+      properties++
+      stringUnits += key.length
+      if (properties > MAX_STYLE_PROPERTIES)
+        throw new Error('Style exceeds the property limit')
+      if (stringUnits > MAX_STYLE_STRING_UNITS)
+        throw new Error('Style exceeds the string-size limit')
+      pending.push({ depth: depth + 1, value: (value as Record<string, unknown>)[key] })
+    }
   }
-  if (raw.background !== undefined && style.backgroundColor === undefined)
-    style.backgroundColor = raw.background
+}
+
+export function normalizeStyle(...sources: Record<string, unknown>[]): DecorationRenderOptions {
+  const style: Record<string, unknown> = {}
+  let copiedProperties = 0
+  let copiedKeyUnits = 0
+  let background: unknown
+  for (const source of sources) {
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key))
+        continue
+      copiedProperties++
+      copiedKeyUnits += key.length
+      if (copiedProperties > MAX_STYLE_PROPERTIES)
+        throw new Error('Style exceeds the property limit')
+      if (copiedKeyUnits > MAX_STYLE_STRING_UNITS)
+        throw new Error('Style exceeds the string-size limit')
+      if (key === 'background')
+        background = source[key]
+      if (!STYLE_ONLY_FIELDS.has(key))
+        style[key] = source[key]
+    }
+  }
+  if (background !== undefined && style.backgroundColor === undefined)
+    style.backgroundColor = background
+  validateStyleComplexity(style)
   return style as DecorationRenderOptions
 }
 
@@ -127,7 +191,7 @@ function compileTargets(
     }
     return styles.map((style, index) => ({
       groupIndex: index + 1,
-      styleId: addStyle(config, normalizeStyle({ ...base, ...style })),
+      styleId: addStyle(config, normalizeStyle(base, style)),
     }))
   }
 
@@ -151,7 +215,7 @@ function compileTargets(
     }
     return colors.map((color, index) => ({
       groupIndex: index + 1,
-      styleId: addStyle(config, normalizeStyle({ ...base, color })),
+      styleId: addStyle(config, normalizeStyle(base, { color })),
     }))
   }
 
@@ -187,7 +251,7 @@ function compileStyleRules(
     config.warnings.push(`Invalid match patterns for ${context}`)
     return []
   }
-  const commonStyle = normalizeStyle({ ...base, ...(option ?? {}) })
+  const commonStyle = normalizeStyle(base, option ?? {})
   const targets = compileTargets(option, base, commonStyle, context, config)
   if (!targets)
     return []

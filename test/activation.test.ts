@@ -312,6 +312,22 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('warns when completed rules exhaust the total range budget', async () => {
+    const light: Record<string, string[]> = {}
+    for (let index = 0; index < 10; index++)
+      light[`rgb(${index},0,0)`] = ['x']
+    light.blue = ['y']
+    light.green = ['TARGET']
+    configuration.rules = { plaintext: { light } }
+    const editor = createEditor(`${'x'.repeat(999)}${'y'.repeat(10)} TARGET`, 'range-exhaustion')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('range budget was exhausted')), 3_000)
+    disposeContext(context)
+  })
+
   it('does not commit a snapshot when the visible scan exceeds its character budget', async () => {
     const editor = createEditor('foo', 'scan-budget')
     window.visibleTextEditors = [editor] as any
