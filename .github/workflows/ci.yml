@@ -97,5 +97,16 @@ jobs:
       - run: pnpm run pack
       - name: Verify extension package contents
         run: |
-          unzip -l vscode-highlight-text-*.vsix | grep -q 'extension/dist/index.js'
-          unzip -l vscode-highlight-text-*.vsix | grep -qi 'extension/README_zh.md'
+          unzip -Z1 vscode-highlight-text-*.vsix | sed '/\/$/d' | sort > actual-files.txt
+          cat > expected-files.txt <<'EOF'
+          [Content_Types].xml
+          extension.vsixmanifest
+          extension/LICENSE.txt
+          extension/README_zh.md
+          extension/dist/index.js
+          extension/icon.png
+          extension/package.json
+          extension/readme.md
+          EOF
+          sort -o expected-files.txt expected-files.txt
+          diff -u expected-files.txt actual-files.txt

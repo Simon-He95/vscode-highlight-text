@@ -478,28 +478,48 @@ function normalizeFilterPath(value: string): string {
   return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized
 }
 
-export function createExcludeFilter(value: unknown): (path: string) => boolean {
-  const patterns = Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
-        .slice(0, MAX_EXCLUDE_PATTERNS)
-        .filter(pattern => pattern.length <= MAX_EXCLUDE_PATTERN_LENGTH)
-        .flatMap((pattern) => {
-          const negated = pattern.startsWith('!')
-          const body = normalizeFilterPath(negated ? pattern.slice(1) : pattern)
-          const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
-          const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
-          try {
-            return [{
-              caseSensitiveMatcher: picomatch(normalized, { dot: true }),
-              caseInsensitiveMatcher: picomatch(normalized, { dot: true, nocase: true }),
-              negated,
-            }]
-          }
-          catch {
-            return []
-          }
+export function createExcludeFilter(value: unknown, warnings: string[] = []): (path: string) => boolean {
+  const patterns: Array<{
+    caseInsensitiveMatcher: ReturnType<typeof picomatch>
+    caseSensitiveMatcher: ReturnType<typeof picomatch>
+    negated: boolean
+  }> = []
+  if (!Array.isArray(value)) {
+    warnings.push('Exclude configuration must be an array of glob patterns')
+  }
+  else {
+    if (value.length > MAX_EXCLUDE_PATTERNS)
+      warnings.push(`Exclude configuration was limited to ${MAX_EXCLUDE_PATTERNS} patterns`)
+    let invalidTypeReported = false
+    for (let index = 0; index < Math.min(value.length, MAX_EXCLUDE_PATTERNS); index++) {
+      const pattern = value[index]
+      if (typeof pattern !== 'string') {
+        if (!invalidTypeReported) {
+          warnings.push('Non-string exclude patterns were ignored')
+          invalidTypeReported = true
+        }
+        continue
+      }
+      if (pattern.length > MAX_EXCLUDE_PATTERN_LENGTH) {
+        warnings.push(`Exclude pattern ${index + 1} exceeds ${MAX_EXCLUDE_PATTERN_LENGTH} characters and was ignored`)
+        continue
+      }
+      const negated = pattern.startsWith('!')
+      const body = normalizeFilterPath(negated ? pattern.slice(1) : pattern)
+      const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
+      const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
+      try {
+        patterns.push({
+          caseSensitiveMatcher: picomatch(normalized, { dot: true }),
+          caseInsensitiveMatcher: picomatch(normalized, { dot: true, nocase: true }),
+          negated,
         })
-    : []
+      }
+      catch (error) {
+        warnings.push(`Exclude pattern ${index + 1} is invalid and was ignored: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
   const cache = new Map<string, boolean>()
   return (path) => {
     const normalizedPath = normalizeFilterPath(path)

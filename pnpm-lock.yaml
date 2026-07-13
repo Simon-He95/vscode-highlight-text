@@ -12,8 +12,8 @@ importers:
         specifier: ^3.16.0
         version: 3.16.0(@typescript-eslint/utils@8.21.0(eslint@9.28.0(jiti@2.4.2))(typescript@5.8.3))(@vue/compiler-sfc@3.4.21)(eslint@9.28.0(jiti@2.4.2))(typescript@5.8.3)(vitest@0.29.8)
       '@types/node':
-        specifier: ^18.19.111
-        version: 18.19.111
+        specifier: ^16.18.126
+        version: 16.18.126
       '@types/picomatch':
         specifier: ^4.0.2
         version: 4.0.3
@@ -680,6 +680,9 @@ packages:
 
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
+
+  '@types/node@16.18.126':
+    resolution: {integrity: sha512-OTcgaiwfGFBKacvfwuHzzn1KLxH/er8mluiy8/uM3sGXHaRe73RrSIj01jow9t4kJEW633Ov+cOexXeiApTyAw==}
 
   '@types/node@18.19.111':
     resolution: {integrity: sha512-90sGdgA+QLJr1F9X79tQuEut0gEYIfkX9pydI4XGRgvFo9g2JWswefI+WUSUHPYVBHYSEfTEqBxA5hQvAZB3Mw==}
@@ -3955,6 +3958,8 @@ snapshots:
       '@types/unist': 3.0.3
 
   '@types/ms@2.1.0': {}
+
+  '@types/node@16.18.126': {}
 
   '@types/node@18.19.111':
     dependencies:

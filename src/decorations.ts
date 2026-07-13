@@ -40,6 +40,8 @@ export class DecorationManager {
     }
     const types = new Map<string, TextEditorDecorationType>()
     try {
+      // Keep high-to-low creation order: current VS Code prepends decoration CSS rules,
+      // so earlier-created, higher-priority layers end up later in the cascade.
       for (const { id, styleId } of layers)
         types.set(id, window.createTextEditorDecorationType(this.styles.get(styleId)!))
       this.typeCount += types.size

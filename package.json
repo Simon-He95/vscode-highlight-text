@@ -320,7 +320,7 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^3.16.0",
-    "@types/node": "^18.19.111",
+    "@types/node": "^16.18.126",
     "@types/picomatch": "^4.0.2",
     "@types/vscode": "1.77.0",
     "@vscode-use/utils": "^0.1.58",

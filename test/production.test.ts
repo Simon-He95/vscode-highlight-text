@@ -337,6 +337,21 @@ describe('regex configuration', () => {
     })
   })
 
+  it('reports ignored and truncated exclude patterns', () => {
+    const warnings: string[] = []
+    createExcludeFilter([
+      ...Array.from({ length: 99 }, (_, index) => `missing-${index}/**`),
+      42,
+      '**/not-compiled/**',
+    ], warnings)
+    expect(warnings).toContainEqual(expect.stringContaining('limited to 100 patterns'))
+    expect(warnings).toContainEqual(expect.stringContaining('Non-string exclude patterns'))
+
+    const longWarnings: string[] = []
+    createExcludeFilter(['x'.repeat(1_001)], longWarnings)
+    expect(longWarnings).toContainEqual(expect.stringContaining('exceeds 1000 characters'))
+  })
+
   it('normalizes styles, empty excludes, and rule-local ignores', () => {
     const source = { background: 'red', textDecoration: 'underline' }
     expect(normalizeStyle(source)).toEqual({ backgroundColor: 'red', textDecoration: 'underline' })

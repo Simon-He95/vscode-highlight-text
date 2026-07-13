@@ -8,7 +8,7 @@ pnpm check
 
 The Vitest suite imports production modules directly and covers:
 
-- on-language activation, self-contained inline settings schema, input-attempt-budgeted configuration compilation, complexity-bounded transactional style registration, malformed settings, capped warnings/toasts, strict RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
+- on-language activation, self-contained inline settings schema, input-attempt-budgeted configuration compilation, complexity-bounded transactional style registration, malformed settings, persistent OutputChannel diagnostics, capped normal/important toasts, strict RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
 - lookarounds, named groups, fail-closed invalid ignore patterns, separate raw/accepted match budgets, interval-level masked-overlap restart, long-prefix recovery, and original sticky-span adoption, advisory diagnostics, single-pass no-ignore execution, and sticky original-text validation;
 - Unicode-aware zero-width matching;
 - worker-start/result infrastructure timeouts, started/finished worker-enforced execution timeout, queue-independent active execution timing, termination barriers, bounded infrastructure auto-retry, circuit breaking, active cancellation, queued cancellation, constructor/postMessage/metrics-callback failure recovery, and ignore/main-scan truncation;
@@ -19,7 +19,7 @@ The Vitest suite imports production modules directly and covers:
 - latest-wins, single-flight scheduling and immediate stale-task invalidation;
 - removal of 1,000 historical editor states;
 - disposal during asynchronous work without late decoration creation;
-- manifest-owned empty defaults and initial activation, transactional rule changes, precompiled, bounded, cached, cwd-independent ordered relative and Windows-case-insensitive relative/absolute excludes and negated re-includes, lightweight exclude-only updates, split editors including duplicate timeout cancellation, structured collision-free rule/layer identity and version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, bounded, equivalence-skipping cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
+- manifest-owned empty defaults and initial activation, transactional rule changes, diagnostic-reporting, precompiled, bounded, cached, cwd-independent ordered relative and Windows-case-insensitive relative/absolute excludes and negated re-includes, lightweight exclude-only updates, split editors including duplicate timeout cancellation, structured collision-free rule/layer identity and version/scan-key snapshot identity, stale highlight cleanup, visible-editor removal, language close/open changes, bounded, equivalence-skipping cached/chunked Vue TSX detection, theme refresh, and exclude cleanup;
 - cooldown enforcement across edits, duplicate-range removal, and preservation of the last complete snapshot when refresh budgets expire;
 - bounded warning/ignore-interval/cache state, masked-text cache size, cache generations, and reuse of unchanged slice text inside the worker;
 - one shared regex executor and language/theme decoration profiles with cached short-ID context-shared profile priority layers, editor-owned preflight reservations, manager/global transition type budgets, failed-profile quarantine, split-editor reuse, cleanup, and disposal.

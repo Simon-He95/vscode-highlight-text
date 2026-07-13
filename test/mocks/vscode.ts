@@ -37,6 +37,7 @@ export const window = {
   activeColorTheme: { kind: ColorThemeKind.Light },
   activeTextEditor: null as any,
   visibleTextEditors: [] as any[],
+  createOutputChannel: vi.fn(() => ({ appendLine: vi.fn(), dispose: vi.fn(), show: vi.fn() })),
   createTextEditorDecorationType: vi.fn((options: any) => ({
     options,
     dispose: vi.fn(),

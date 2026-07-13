@@ -365,7 +365,10 @@ describe('extension activation orchestration', () => {
     const context = { subscriptions: [] } as unknown as ExtensionContext
     activate(context)
     expect(window.showWarningMessage).toHaveBeenCalledTimes(5)
+    const output = vi.mocked(window.createOutputChannel).mock.results[0].value
+    expect(output.appendLine).toHaveBeenCalledTimes(20)
     disposeContext(context)
+    expect(output.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('attributes timeout diagnostics to rule execution including ignoreReg', async () => {

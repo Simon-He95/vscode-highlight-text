@@ -257,7 +257,10 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
 export function activate(context: ExtensionContext): void {
   let disposed = false
   let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', {}))
-  let shouldProcess = getExcludeFilter()
+  const initialExcludeWarnings: string[] = []
+  let shouldProcess = getExcludeFilter(initialExcludeWarnings)
+  const output = window.createOutputChannel('vscode-highlight-text')
+  context.subscriptions.push(output)
   let initialManagerError: unknown
   let manager = new DecorationManager(compiled.styles)
   for (const editor of window.visibleTextEditors) {
@@ -279,19 +282,25 @@ export function activate(context: ExtensionContext): void {
   const getExecutor = (_editor: TextEditor) => executor
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
   const warned = new BoundedSet<string>(MAX_REMEMBERED_WARNINGS)
+  let importantToastCount = 0
   let warningToastCount = 0
 
-  const warnOnce = (warning: string) => {
+  const warnOnce = (warning: string, important = false) => {
     if (disposed || !warned.add(warning))
       return
-    if (warningToastCount >= 5)
+    output.appendLine(`[${new Date().toISOString()}] ${warning}`)
+    if (important ? importantToastCount >= 5 : warningToastCount >= 5)
       return
-    warningToastCount++
+    if (important)
+      importantToastCount++
+    else
+      warningToastCount++
     void window.showWarningMessage(`vscode-highlight-text: ${warning}`)
   }
-  compiled.warnings.forEach(warnOnce)
+  compiled.warnings.forEach(warning => warnOnce(warning))
+  initialExcludeWarnings.forEach(warning => warnOnce(warning))
   if (initialManagerError)
-    warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`)
+    warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`, true)
 
   const retryTimers = new Map<TextEditor, ReturnType<typeof setTimeout>>()
   let scheduleContinuation = (_editor: TextEditor) => {}
@@ -323,7 +332,7 @@ export function activate(context: ExtensionContext): void {
       return
     }
     const { priorityStyleIds, profileId, rules, warnings } = getRuleSelection(compiled, document)
-    warnings.forEach(warnOnce)
+    warnings.forEach(warning => warnOnce(warning))
     if (!rules.length) {
       if (isCurrent())
         clearEditor()
@@ -397,7 +406,7 @@ export function activate(context: ExtensionContext): void {
         for (let index = session.nextRuleIndex; index < rules.length; index++)
           session.failedRuleIds.add(rules[index].id)
         session.nextRuleIndex = rules.length
-        warnOnce(`Highlight range budget was exhausted in ${document.uri.fsPath}; ${skipped} remaining rules were skipped`)
+        warnOnce(`Highlight range budget was exhausted in ${document.uri.fsPath}; ${skipped} remaining rules were skipped`, true)
         break
       }
       const rule = rules[session.nextRuleIndex]
@@ -476,14 +485,14 @@ export function activate(context: ExtensionContext): void {
           if (isRegexExecutionInfrastructureError(error)) {
             infrastructureFailed = true
             infrastructureRetryAfterMs = error.retryAfterMs
-            warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`)
+            warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`, true)
           }
           else if (isRegexExecutionTimeoutError(error)) {
             chunkTimeoutCount++
             session.failedRuleIds.add(rule.id)
             failures.recordFailure(document, rule.id)
             restartSiblingEditors(editor, document)
-            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`)
+            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`, true)
           }
           else if (isRegexExecutionLimitError(error)) {
             session.failedRuleIds.add(rule.id)
@@ -585,7 +594,7 @@ export function activate(context: ExtensionContext): void {
       )
       if (!rangesByStyle) {
         clearStaleSnapshot()
-        warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; stale highlights were cleared when necessary`)
+        warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; stale highlights were cleared when necessary`, true)
         return
       }
       ruleSnapshots.set(editor, nextSnapshots)
@@ -596,7 +605,7 @@ export function activate(context: ExtensionContext): void {
   const scheduler = new LatestTaskScheduler<TextEditor>(
     updateEditor,
     UPDATE_DELAY,
-    error => warnOnce(error instanceof Error ? error.message : String(error)),
+    error => warnOnce(error instanceof Error ? error.message : String(error), true),
   )
   scheduleContinuation = editor => scheduler.schedule(editor, true)
   restartSiblingEditors = (editor, document) => {
@@ -680,13 +689,16 @@ export function activate(context: ExtensionContext): void {
       if (!rulesChanged && !excludeChanged)
         return
       if (!rulesChanged) {
-        shouldProcess = getExcludeFilter()
+        const excludeWarnings: string[] = []
+        shouldProcess = getExcludeFilter(excludeWarnings)
+        excludeWarnings.forEach(warning => warnOnce(warning))
         window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
         refreshVisibleEditors(true)
         return
       }
       const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', {}))
-      const nextFilter = excludeChanged ? getExcludeFilter() : shouldProcess
+      const excludeWarnings: string[] = []
+      const nextFilter = excludeChanged ? getExcludeFilter(excludeWarnings) : shouldProcess
       let nextManager: DecorationManager | undefined
       try {
         nextManager = new DecorationManager(nextCompiled.styles)
@@ -699,7 +711,7 @@ export function activate(context: ExtensionContext): void {
       }
       catch (error) {
         nextManager?.dispose()
-        warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`)
+        warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`, true)
         return
       }
       window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
@@ -713,8 +725,10 @@ export function activate(context: ExtensionContext): void {
       failures.clear()
       executor.resetCache()
       warned.clear()
+      importantToastCount = 0
       warningToastCount = 0
-      compiled.warnings.forEach(warnOnce)
+      compiled.warnings.forEach(warning => warnOnce(warning))
+      excludeWarnings.forEach(warning => warnOnce(warning))
       previousManager.dispose()
       refreshVisibleEditors(true)
     }),
@@ -743,7 +757,7 @@ export function activate(context: ExtensionContext): void {
 
 export function deactivate(): void {}
 
-function getExcludeFilter(): (path: string) => boolean {
+function getExcludeFilter(warnings?: string[]): (path: string) => boolean {
   const value = getConfiguration('vscode-highlight-text.exclude', ['**/dist/**', '**/node_modules/**'])
-  return createExcludeFilter(value)
+  return createExcludeFilter(value, warnings)
 }
