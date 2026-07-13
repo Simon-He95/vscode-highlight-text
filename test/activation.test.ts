@@ -111,6 +111,18 @@ describe('extension activation orchestration', () => {
     __resetVscodeMock()
   })
 
+  it('uses the manifest empty default without hidden source fallback rules', () => {
+    configuration.rules = {}
+    const editor = createEditor('v-if', 'empty-default')
+    editor.document.languageId = 'vue'
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    disposeContext(context)
+  })
+
   it('does not detect Vue TSX when Vue and Vue TSX rules are identical', async () => {
     configuration.rules = { 'vue|vuetsx': { light: { red: ['foo'] } } }
     const editor = createEditor('foo', 'same-vue-rules')

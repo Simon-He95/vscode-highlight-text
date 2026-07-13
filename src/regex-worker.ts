@@ -18,8 +18,10 @@ export interface WorkerRequest {
 interface WorkerResponse {
   error?: string
   errorCode?: string
+  finished?: boolean
   id: number
-  results: MatchResult[]
+  results?: MatchResult[]
+  started?: boolean
 }
 
 interface PendingJob {
@@ -73,6 +75,7 @@ function collect(regex, text, limit, onMatch, maxRetries = 0) {
 }
 
 parentPort.on('message', ({ id, request }) => {
+  parentPort.postMessage({ id, started: true })
   try {
     if (request.text !== undefined) {
       cachedText = request.text
@@ -303,9 +306,11 @@ parentPort.on('message', ({ id, request }) => {
       error.code = 'MATCH_LIMIT'
       throw error
     }
+    parentPort.postMessage({ id, finished: true })
     parentPort.postMessage({ id, results })
   }
   catch (error) {
+    parentPort.postMessage({ id, finished: true })
     parentPort.postMessage({ id, error: error instanceof Error ? error.message : String(error), errorCode: error && error.code })
   }
 })
@@ -517,14 +522,16 @@ export class RegexExecutor {
     const worker = this.worker ?? this.createWorker()
     const id = ++this.nextId
     let settled = false
+    let executionFinishedAt: number | undefined
     let executionStartedAt: number | undefined
-    let timer: ReturnType<typeof setTimeout>
+    let timer: ReturnType<typeof setTimeout> | undefined
     let onError: (error: Error) => void
     let onExit: () => void
     let onMessage: (message: WorkerResponse) => void
 
     const cleanup = () => {
-      clearTimeout(timer)
+      if (timer)
+        clearTimeout(timer)
       worker.off('message', onMessage)
       worker.off('error', onError)
       worker.off('exit', onExit)
@@ -539,7 +546,7 @@ export class RegexExecutor {
       settled = true
       cleanup()
       if (executionStartedAt !== undefined) {
-        const executionMs = Date.now() - executionStartedAt
+        const executionMs = (executionFinishedAt ?? Date.now()) - executionStartedAt
         if (error)
           Object.defineProperty(error, 'executionMs', { configurable: true, value: executionMs })
         try {
@@ -586,6 +593,32 @@ export class RegexExecutor {
     onMessage = (message: WorkerResponse) => {
       if (message.id !== id)
         return
+      if (message.started) {
+        if (executionStartedAt !== undefined)
+          return
+        if (timer)
+          clearTimeout(timer)
+        executionStartedAt = Date.now()
+        timer = setTimeout(
+          () => finish(new RegexExecutionTimeoutError(this.timeoutMs), undefined, true),
+          this.timeoutMs,
+        )
+        return
+      }
+      if (message.finished) {
+        executionFinishedAt = Date.now()
+        if (timer)
+          clearTimeout(timer)
+        timer = setTimeout(() => {
+          this.blockInfrastructure()
+          finish(new RegexExecutionInfrastructureError('Regular expression worker result transfer timed out'), undefined, true)
+        }, 5_000)
+        return
+      }
+      if (executionStartedAt === undefined) {
+        executionStartedAt = Date.now()
+        executionFinishedAt = executionStartedAt
+      }
       const error = message.error
         ? message.errorCode === 'REFRESH_BUDGET'
           ? new RegexExecutionBudgetError(message.error)
@@ -593,14 +626,14 @@ export class RegexExecutor {
             ? new RegexExecutionLimitError(message.error)
             : new Error(message.error)
         : undefined
-      finish(error, message.results)
+      finish(error, message.results ?? [])
     }
 
     this.activeCancel = error => finish(error, undefined, true)
-    timer = setTimeout(
-      () => finish(new RegexExecutionTimeoutError(this.timeoutMs), undefined, true),
-      this.timeoutMs,
-    )
+    timer = setTimeout(() => {
+      this.blockInfrastructure()
+      finish(new RegexExecutionInfrastructureError('Regular expression worker did not start in time'), undefined, true)
+    }, 5_000)
     worker.on('message', onMessage)
     worker.once('error', onError)
     worker.once('exit', onExit)
@@ -609,7 +642,6 @@ export class RegexExecutor {
       const request = this.workerText === text
         ? { ...rest, cacheGeneration: this.cacheGeneration }
         : { ...job.request, cacheGeneration: this.cacheGeneration }
-      executionStartedAt = Date.now()
       worker.postMessage({ id, request })
       this.workerText = text
     }

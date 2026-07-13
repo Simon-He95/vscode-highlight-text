@@ -27,26 +27,6 @@ const OVERSCAN_LINES = 20
 const MAX_VUE_LANGUAGE_DETECTION_SIZE = 300_000
 const UPDATE_DELAY = 100
 
-const defaultConfig = {
-  vue: {
-    light: {
-      'purple': { match: ['v-if', 'v-else-if', 'v-else'], before: { contentText: '✨' } },
-      '#B392F0': ['v-for'],
-      '#FFC83D': ['<template\\s+(\\#[^\\s\\/>=]+)', 'v-bind', 'v-once', 'v-on', '(v-slot:[^>\\s\\/>]+)', 'v-html', 'v-text'],
-      'rgb(99, 102, 241)': [':is'],
-      'rgb(14, 165, 233)': ['(defineProps)[<\\(]', 'defineOptions', 'defineEmits', 'defineExpose'],
-    },
-    dark: {
-      'purple': { match: ['v-if', 'v-else-if', 'v-else'], before: { contentText: '✨' } },
-      '#B392F0': ['v-for'],
-      '#FFC83D': ['<template\\s+(\\#[^\\s\\/>=]+)', 'v-bind', 'v-once', 'v-on', '(v-slot:[^>\\s\\/>]+)', 'v-html', 'v-text'],
-      'rgb(99, 102, 241)': [':is'],
-      'rgb(14, 165, 233)': ['(defineProps)[<\\(]', 'defineOptions', 'defineEmits', 'defineExpose'],
-    },
-  },
-  react: { light: {}, dark: {} },
-}
-
 interface RuleSnapshot {
   documentVersion: number
   scanKey: string
@@ -227,7 +207,7 @@ function buildRuleSelection(config: CompiledConfig, languageId: string, dark: bo
   const priorityStyleIds: Array<{ id: string, styleId: string }> = []
   const layerIds = new Map<string, string>()
   const rules = sourceRules.flatMap((rule) => {
-    const targetKeys = rule.targets.map((target, targetIndex) => JSON.stringify([rule.context, targetIndex, target.styleId]))
+    const targetKeys = rule.targets.map((target, targetIndex) => JSON.stringify([rule.layerContextId, targetIndex, target.styleId]))
     const newLayerCount = new Set(targetKeys.filter(key => !layerIds.has(key))).size
     if (priorityStyleIds.length + newLayerCount > MAX_PROFILE_LAYERS) {
       warnings.push(`${rule.context} was omitted because the ${MAX_PROFILE_LAYERS}-layer profile limit was reached`)
@@ -276,7 +256,7 @@ function getRuleSelection(config: CompiledConfig, document: TextDocument) {
 
 export function activate(context: ExtensionContext): void {
   let disposed = false
-  let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
+  let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', {}))
   let shouldProcess = getExcludeFilter()
   let initialManagerError: unknown
   let manager = new DecorationManager(compiled.styles)
@@ -294,7 +274,7 @@ export function activate(context: ExtensionContext): void {
   }
   let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
   let scanSessions = new WeakMap<TextEditor, ScanSession>()
-  let structuralFailures = new WeakMap<TextDocument, { key: string, ruleIds: Set<string> }>()
+  let structuralFailures = new WeakMap<TextEditor, { key: string, ruleIds: Set<string> }>()
   const executor = new RegexExecutor()
   const getExecutor = (_editor: TextEditor) => executor
   const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
@@ -368,10 +348,10 @@ export function activate(context: ExtensionContext): void {
     }
 
     const sessionKey = JSON.stringify([documentVersion, scanPlan.scanKey, profileId])
-    let structuralFailure = structuralFailures.get(document)
+    let structuralFailure = structuralFailures.get(editor)
     if (!structuralFailure || structuralFailure.key !== sessionKey) {
       structuralFailure = { key: sessionKey, ruleIds: new Set() }
-      structuralFailures.set(document, structuralFailure)
+      structuralFailures.set(editor, structuralFailure)
     }
     let session = scanSessions.get(editor)
     if (!session || session.key !== sessionKey) {
@@ -393,7 +373,7 @@ export function activate(context: ExtensionContext): void {
       }
       scanSessions.set(editor, session)
     }
-    const budget = new RefreshBudget(MAX_TOTAL_RANGES, MAX_TOTAL_SCAN_TIME)
+    const budget = new RefreshBudget(MAX_TOTAL_RANGES, Number.POSITIVE_INFINITY)
     for (let index = 0; index < session.acceptedRangeKeys.size; index++)
       budget.consumeRange()
     const executor = getExecutor(editor)
@@ -402,12 +382,13 @@ export function activate(context: ExtensionContext): void {
     let needsContinuation = false
     let sessionLimitReached = false
     let chunkJobCount = 0
+    let chunkExecutionMs = 0
     let chunkTimeoutCount = 0
 
     while (session.nextRuleIndex < rules.length) {
       if (!isCurrent())
         return
-      if (budget.timeExceeded) {
+      if (chunkExecutionMs >= MAX_TOTAL_SCAN_TIME) {
         needsContinuation = true
         break
       }
@@ -432,7 +413,7 @@ export function activate(context: ExtensionContext): void {
       while (session.nextSliceIndex < scanPlan.slices.length) {
         if (!isCurrent())
           return
-        if (budget.timeExceeded) {
+        if (chunkExecutionMs >= MAX_TOTAL_SCAN_TIME) {
           needsContinuation = true
           break
         }
@@ -462,6 +443,7 @@ export function activate(context: ExtensionContext): void {
           if (!isCurrent())
             return
           session.elapsedScanTime += scanResult.executionMs
+          chunkExecutionMs += scanResult.executionMs
           session.workerJobCount++
           chunkJobCount++
           for (const match of scanResult.ranges) {
@@ -484,7 +466,9 @@ export function activate(context: ExtensionContext): void {
         catch (error) {
           if (!isCurrent() || isRegexExecutionAbortedError(error))
             return
-          session.elapsedScanTime += getExecutionDuration(error)
+          const executionMs = getExecutionDuration(error)
+          session.elapsedScanTime += executionMs
+          chunkExecutionMs += executionMs
           session.workerJobCount++
           chunkJobCount++
           ruleFailed = true
@@ -701,7 +685,7 @@ export function activate(context: ExtensionContext): void {
         refreshVisibleEditors(true)
         return
       }
-      const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', defaultConfig))
+      const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', {}))
       const nextFilter = excludeChanged ? getExcludeFilter() : shouldProcess
       let nextManager: DecorationManager | undefined
       try {

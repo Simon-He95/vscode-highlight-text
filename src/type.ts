@@ -24,6 +24,7 @@ export interface CompiledTarget {
 export interface CompiledRule {
   context: string
   id: string
+  layerContextId: string
   ignores: CompiledPattern[]
   pattern: CompiledPattern
   targets: CompiledTarget[]

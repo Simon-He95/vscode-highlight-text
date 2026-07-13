@@ -226,6 +226,7 @@ function compileStyleRules(
   color: string,
   raw: unknown,
   context: string,
+  layerContextId: string,
   config: CompiledConfig,
   budget: CompilationBudget,
 ): CompiledRule[] {
@@ -300,7 +301,8 @@ function compileStyleRules(
         config.warnings.push(`Potentially expensive regular expression for ${context}: ${pattern.source}`)
       return [{
         context,
-        id: JSON.stringify([context, pattern.source, pattern.flags]),
+        id: JSON.stringify([layerContextId, pattern.source, pattern.flags]),
+        layerContextId,
         ignores,
         pattern,
         targets,
@@ -348,7 +350,7 @@ function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', con
     const previousCanonicalKeys = new Set(STYLE_IDS.get(config)?.keys() ?? [])
     try {
       const remaining = maxRules - rules.length
-      const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, config, budget).slice(0, remaining)
+      const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, JSON.stringify([language, mode, color]), config, budget).slice(0, remaining)
       if (!compiled.length)
         rollbackStyles(config, previousStyleIds, previousCanonicalKeys)
       rules.push(...compiled)

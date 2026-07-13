@@ -41,6 +41,7 @@ describe('regex configuration', () => {
     const match = rulesSchema.additionalProperties.properties.light.additionalProperties.anyOf[1].properties.match
     expect(match.anyOf[0]).toEqual({ type: 'string' })
     expect(match.anyOf[1].items.anyOf).toHaveLength(2)
+    expect(rulesSchema.default).toEqual({ astro: {}, markdown: {}, react: {}, solid: {}, svelte: {}, vue: {} })
   })
 
   it('normalizes flags and accepts JavaScript assertions and named groups', () => {
@@ -263,13 +264,14 @@ describe('regex configuration', () => {
     expect(compiled.warnings).toEqual([])
   })
 
-  it('uses collision-free structured rule identifiers', () => {
-    const compiled = compileConfig({ plaintext: { light: {
-      'red:a': { match: ['b'], color: 'red' },
-      'red': { match: ['a:b'], color: 'blue' },
-    } } })
-    const ids = getRulesForLanguage(compiled, 'plaintext', false).map(rule => rule.id)
-    expect(new Set(ids).size).toBe(2)
+  it('uses collision-free structured rule and layer identifiers', () => {
+    const compiled = compileConfig({
+      'lang|a': { light: { 'x.light.red': { color: 'blue', match: ['foo'] } } },
+      'lang|a.light.x': { light: { red: ['foo'] } },
+    })
+    const rules = getRulesForLanguage(compiled, 'lang', false)
+    expect(new Set(rules.map(rule => rule.id)).size).toBe(2)
+    expect(new Set(rules.map(rule => rule.layerContextId)).size).toBe(2)
   })
 
   it('supports language IDs that match object prototype names', () => {
@@ -451,6 +453,7 @@ describe('regex execution', () => {
     const rule = {
       context: 'test',
       id: 'test',
+      layerContextId: 'test',
       ignores: [],
       pattern: { source: '^[\\s\\S]*?(foo)', flags: 'gd' },
       targets: [{ groupIndex: 1, styleId: 'red' }],
@@ -471,6 +474,7 @@ describe('regex execution', () => {
     const rule = {
       context: 'test',
       id: 'test',
+      layerContextId: 'test',
       ignores: [],
       pattern: { source: '(a)(b)', flags: 'gd' },
       targets: [{ groupIndex: 1, styleId: 'red' }, { groupIndex: 2, styleId: 'blue' }],
@@ -839,6 +843,26 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('does not charge delayed worker startup to the regex timeout', async () => {
+    vi.useFakeTimers()
+    const worker = new EventEmitter() as any
+    let id = 0
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.terminate = vi.fn(async () => 0)
+    worker.postMessage = vi.fn((message: { id: number }) => id = message.id)
+    const executor = new RegexExecutor(10, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    const result = executor.execute(request)
+    await vi.advanceTimersByTimeAsync(800)
+    worker.emit('message', { id, started: true })
+    worker.emit('message', { finished: true, id })
+    worker.emit('message', { id, results: [{ spans: [[0, 1]] }] })
+    await expect(result).resolves.toEqual([{ spans: [[0, 1]] }])
+    executor.dispose()
+    vi.useRealTimers()
+  })
+
   it('reports active execution time without charging queued wait time', async () => {
     let now = 0
     vi.spyOn(Date, 'now').mockImplementation(() => now)
@@ -855,11 +879,15 @@ describe('regex execution', () => {
     const first = executor.execute(request, undefined, duration => firstDuration = duration)
     const second = executor.execute(request, undefined, duration => secondDuration = duration)
     expect(ids).toHaveLength(1)
+    worker.emit('message', { id: ids[0], started: true })
     now = 4_000
+    worker.emit('message', { finished: true, id: ids[0] })
     worker.emit('message', { id: ids[0], results: [{ spans: [[0, 1]] }] })
     await first
     expect(ids).toHaveLength(2)
+    worker.emit('message', { id: ids[1], started: true })
     now = 4_001
+    worker.emit('message', { finished: true, id: ids[1] })
     worker.emit('message', { id: ids[1], results: [{ spans: [[0, 1]] }] })
     await second
     expect(firstDuration).toBe(4_000)
@@ -901,7 +929,7 @@ describe('regex execution', () => {
       const worker = new EventEmitter() as any
       worker.off = worker.removeListener.bind(worker)
       worker.unref = vi.fn()
-      worker.postMessage = vi.fn()
+      worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, started: true })))
       worker.terminate = vi.fn(() => new Promise<number>((resolve) => {
         releaseTermination = () => resolve(0)
       }))
