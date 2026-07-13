@@ -8,10 +8,10 @@ pnpm check
 
 The Vitest suite imports production modules directly and covers:
 
-- on-language activation, self-contained inline settings schema, input-attempt-budgeted configuration compilation, complexity-bounded transactional style registration, malformed settings, persistent OutputChannel diagnostics, capped normal/important toasts, strict RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
+- on-language-only activation, self-contained inline settings schema, input-attempt-budgeted configuration compilation, complexity-bounded transactional style registration, malformed settings, persistent OutputChannel diagnostics, capped normal/important toasts, strict RegExp flags, nested tuple syntax, and ambiguous top-level-array compatibility;
 - lookarounds, named groups, fail-closed invalid ignore patterns, separate raw/accepted match budgets, interval-level masked-overlap restart, long-prefix recovery, and original sticky-span adoption, advisory diagnostics, single-pass no-ignore execution, and sticky original-text validation;
 - Unicode-aware zero-width matching;
-- worker-start/result infrastructure timeouts, started/finished worker-enforced execution timeout, queue-independent active execution timing, termination barriers, bounded infrastructure auto-retry, circuit breaking, active cancellation, queued cancellation, constructor/postMessage/metrics-callback failure recovery, and ignore/main-scan truncation;
+- worker-start/result infrastructure timeouts, started/finished worker-enforced execution timeout, per-request chunk/session deadlines, queue-independent active execution timing, termination barriers, bounded infrastructure auto-retry, circuit breaking, active cancellation, queued cancellation, constructor/postMessage/metrics-callback failure recovery, and ignore/main-scan truncation;
 - sticky, explicit-empty, and document-relative `^`/`$` slice-boundary semantics;
 - engine-provided full-match/capture indices, legacy first-participating capture semantics including empty-group stopping, and artificial slice-boundary rejection;
 - React JSX/TSX alias compatibility and rule-local `ignoreReg` behavior;

@@ -6,7 +6,7 @@ import { deepMerge } from 'lazy-js-utils'
 import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
 import { DecorationManager } from './decorations'
-import { isRegexExecutionAbortedError, isRegexExecutionInfrastructureError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
+import { isRegexExecutionAbortedError, isRegexExecutionBudgetError, isRegexExecutionInfrastructureError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
@@ -80,6 +80,26 @@ function isDarkTheme(): boolean {
     || window.activeColorTheme.kind === ColorThemeKind.HighContrast
 }
 
+export function previousCodePointOffset(document: TextDocument, offset: number): number {
+  if (offset <= 0)
+    return 0
+  const probeStart = Math.max(0, offset - 2)
+  const probe = document.getText(new Range(document.positionAt(probeStart), document.positionAt(offset)))
+  const last = probe.charCodeAt(probe.length - 1)
+  const previous = probe.charCodeAt(probe.length - 2)
+  return offset - (last >= 0xDC00 && last <= 0xDFFF && previous >= 0xD800 && previous <= 0xDBFF ? 2 : 1)
+}
+
+export function nextCodePointOffset(document: TextDocument, offset: number, documentEnd: number): number {
+  if (offset >= documentEnd)
+    return documentEnd
+  const probeEnd = Math.min(documentEnd, offset + 2)
+  const probe = document.getText(new Range(document.positionAt(offset), document.positionAt(probeEnd)))
+  const first = probe.charCodeAt(0)
+  const second = probe.charCodeAt(1)
+  return offset + (first >= 0xD800 && first <= 0xDBFF && second >= 0xDC00 && second <= 0xDFFF ? 2 : 1)
+}
+
 function getScanSlices(editor: TextEditor): ScanPlan {
   const document = editor.document
   const ranges = editor.visibleRanges
@@ -108,8 +128,8 @@ function getScanSlices(editor: TextEditor): ScanPlan {
     artificialEnd: end < documentEnd,
     coreStart: start,
     coreEnd: end,
-    scanStart: Math.max(0, start - 1),
-    scanEnd: Math.min(documentEnd, end + 1),
+    scanStart: previousCodePointOffset(document, start),
+    scanEnd: nextCodePointOffset(document, end, documentEnd),
   }))
   const totalSize = plannedSlices.reduce((total, slice) => total + slice.scanEnd - slice.scanStart, 0)
   if (totalSize > MAX_SCAN_SIZE)
@@ -130,6 +150,7 @@ export async function scanRule(
   acceptedMatchOffset: number,
   maxSpans: number,
   refreshSpanBudget: boolean,
+  executionTimeoutMs?: number,
 ): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }> }> {
   let executionMs = 0
   const matches = await executor.execute({
@@ -142,7 +163,7 @@ export async function scanRule(
     pattern: rule.pattern,
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
-  }, signal, durationMs => executionMs = durationMs)
+  }, signal, durationMs => executionMs = durationMs, executionTimeoutMs)
 
   let acceptedMatchCount = 0
   const ranges = matches.flatMap((match) => {
@@ -438,6 +459,10 @@ export function activate(context: ExtensionContext): void {
           needsContinuation = true
           break
         }
+        const remainingChunkMs = MAX_TOTAL_SCAN_TIME - chunkExecutionMs
+        const remainingSessionMs = MAX_SESSION_SCAN_TIME - session.elapsedScanTime
+        const executionTimeoutMs = Math.max(1, Math.min(500, remainingChunkMs, remainingSessionMs))
+        const budgetEndsSession = remainingSessionMs <= remainingChunkMs && remainingSessionMs < 500
         try {
           const scanResult = await scanRule(
             executor,
@@ -448,6 +473,7 @@ export function activate(context: ExtensionContext): void {
             session.currentRuleMatchCount,
             MAX_TOTAL_RANGES,
             false,
+            executionTimeoutMs,
           )
           if (!isCurrent())
             return
@@ -482,7 +508,14 @@ export function activate(context: ExtensionContext): void {
           chunkJobCount++
           ruleFailed = true
           const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
-          if (isRegexExecutionInfrastructureError(error)) {
+          if (isRegexExecutionBudgetError(error)) {
+            ruleFailed = false
+            if (budgetEndsSession)
+              sessionLimitReached = true
+            else
+              needsContinuation = true
+          }
+          else if (isRegexExecutionInfrastructureError(error)) {
             infrastructureFailed = true
             infrastructureRetryAfterMs = error.retryAfterMs
             warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`, true)

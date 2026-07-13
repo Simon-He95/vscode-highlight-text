@@ -6,9 +6,9 @@ import { window } from 'vscode'
 import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
-import { scanRule } from '../src/index'
+import { nextCodePointOffset, previousCodePointOffset, scanRule } from '../src/index'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
-import { createRegexWorker, isRegexExecutionAbortedError, RegexExecutor } from '../src/regex-worker'
+import { createRegexWorker, isRegexExecutionAbortedError, isRegexExecutionBudgetError, RegexExecutor } from '../src/regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
 import { LatestTaskScheduler } from '../src/scheduler'
 
@@ -366,6 +366,20 @@ describe('regex configuration', () => {
     const rules = getRulesForLanguage(compiled, 'vue', false)
     expect(rules[0].ignores).toHaveLength(1)
     expect(rules[1].ignores).toHaveLength(0)
+  })
+})
+
+describe('scan boundaries', () => {
+  it('extends scan context without splitting UTF-16 surrogate pairs', () => {
+    const text = 'a😀b'
+    const document = {
+      getText: (range: { end: number, start: number }) => text.slice(range.start, range.end),
+      positionAt: (offset: number) => offset,
+    } as any
+    expect(nextCodePointOffset(document, 0, text.length)).toBe(1)
+    expect(nextCodePointOffset(document, 1, text.length)).toBe(3)
+    expect(previousCodePointOffset(document, 3)).toBe(1)
+    expect(previousCodePointOffset(document, text.length)).toBe(3)
   })
 })
 
@@ -925,6 +939,19 @@ describe('regex execution', () => {
     await expect(first).resolves.toEqual([{ spans: [[0, 1]] }])
     await expect(second).resolves.toEqual([{ spans: [[0, 1]] }])
     expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
+  it('uses a per-request timeout as a scan budget without recording a regex timeout', async () => {
+    const worker = new EventEmitter() as any
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, started: true })))
+    worker.terminate = vi.fn(async () => 0)
+    const executor = new RegexExecutor(500, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request, undefined, undefined, 10)).rejects.toSatisfy(isRegexExecutionBudgetError)
+    expect(worker.terminate).toHaveBeenCalledTimes(1)
     executor.dispose()
   })
 

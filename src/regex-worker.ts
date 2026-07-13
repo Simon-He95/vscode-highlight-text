@@ -26,6 +26,7 @@ interface WorkerResponse {
 
 interface PendingJob {
   onAbort?: () => void
+  executionTimeoutMs: number
   onExecutionComplete?: (durationMs: number) => void
   reject: (error: Error) => void
   request: WorkerRequest
@@ -402,14 +403,19 @@ export class RegexExecutor {
     this.cacheGeneration++
   }
 
-  execute(request: WorkerRequest, signal?: AbortSignal, onExecutionComplete?: (durationMs: number) => void): Promise<MatchResult[]> {
+  execute(
+    request: WorkerRequest,
+    signal?: AbortSignal,
+    onExecutionComplete?: (durationMs: number) => void,
+    executionTimeoutMs = this.timeoutMs,
+  ): Promise<MatchResult[]> {
     if (this.disposed || signal?.aborted)
       return Promise.reject(new RegexExecutionAbortedError())
     if (Date.now() < this.infrastructureBlockedUntil)
       return Promise.reject(new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable', this.infrastructureBlockedUntil - Date.now()))
 
     return new Promise((resolve, reject) => {
-      const job: PendingJob = { onExecutionComplete, request, resolve, reject, signal }
+      const job: PendingJob = { executionTimeoutMs, onExecutionComplete, request, resolve, reject, signal }
       if (signal) {
         job.onAbort = () => this.cancel(job)
         signal.addEventListener('abort', job.onAbort, { once: true })
@@ -599,10 +605,12 @@ export class RegexExecutor {
         if (timer)
           clearTimeout(timer)
         executionStartedAt = Date.now()
-        timer = setTimeout(
-          () => finish(new RegexExecutionTimeoutError(this.timeoutMs), undefined, true),
-          this.timeoutMs,
-        )
+        timer = setTimeout(() => {
+          const error = job.executionTimeoutMs < this.timeoutMs
+            ? new RegexExecutionBudgetError(`Regular expression execution exceeded the remaining ${job.executionTimeoutMs}ms scan budget`)
+            : new RegexExecutionTimeoutError(this.timeoutMs)
+          finish(error, undefined, true)
+        }, job.executionTimeoutMs)
         return
       }
       if (message.finished) {

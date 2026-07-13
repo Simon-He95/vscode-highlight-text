@@ -42,8 +42,7 @@
     "vscode": "^1.77.0"
   },
   "activationEvents": [
-    "onLanguage",
-    "onStartupFinished"
+    "onLanguage"
   ],
   "contributes": {
     "configuration": {
