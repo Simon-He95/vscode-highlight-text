@@ -571,6 +571,32 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('does not let artificial anchors consume visible alternatives or ignores', async () => {
+    const executor = new RegexExecutor(500)
+    const text = 'Xfoo filler TARGETY'
+    const request = {
+      acceptedIntervals: [[1, text.length - 1]] as Array<[number, number]>,
+      artificialEnd: true,
+      artificialStart: true,
+      maxMatches: 10,
+      targetGroups: [1],
+      text,
+      textKey: 'guarded-anchors',
+    }
+    await expect(executor.execute({
+      ...request,
+      ignores: [],
+      pattern: { source: '^foo[\s\S]*?(TARGET)|(TARGET)', flags: 'gd' },
+      targetGroups: [1, 2],
+    })).resolves.toEqual([{ spans: [undefined, [12, 18]] }])
+    await expect(executor.execute({
+      ...request,
+      ignores: [{ source: '^foo[\s\S]*?TARGET', flags: 'gd' }],
+      pattern: { source: '(TARGET)', flags: 'gd' },
+    })).resolves.toEqual([{ spans: [[12, 18]] }])
+    executor.dispose()
+  })
+
   it('counts regex matches separately from generated capture ranges', async () => {
     const executor = new RegexExecutor(500)
     const rule = {

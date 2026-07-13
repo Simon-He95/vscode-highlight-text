@@ -3,7 +3,7 @@ import type * as vscodeMockType from './mocks/vscode'
 import * as vscodeUtils from '@vscode-use/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as vscode from 'vscode'
-import { activate, getRuleLanguageId } from '../src/index'
+import { activate, containsVueTsxBlock, getRuleLanguageId } from '../src/index'
 
 vi.mock('@vscode-use/utils', () => {
   const configuration = { exclude: [] as string[], rules: {} as object }
@@ -72,10 +72,21 @@ function disposeContext(context: ExtensionContext): void {
 }
 
 describe('vue TSX language detection', () => {
+  it('scans malformed opening tags with bounded linear work', () => {
+    const malformed = '<script '.repeat(37_500)
+    const startedAt = performance.now()
+    expect(containsVueTsxBlock(malformed)).toBe(false)
+    expect(performance.now() - startedAt).toBeLessThan(500)
+  })
+
   it('recognizes script and template TSX blocks', () => {
     const script = createEditor('<script setup lang="tsx">const view = <div /></script>')
     script.document.languageId = 'vue'
     expect(getRuleLanguageId(script.document as any)).toBe('vuetsx')
+
+    const quotedAngle = createEditor('<script title="<not-a-tag>" lang="tsx"></script>')
+    quotedAngle.document.languageId = 'vue'
+    expect(getRuleLanguageId(quotedAngle.document as any)).toBe('vuetsx')
 
     const template = createEditor('<template lang = "tsx"><div /></template>')
     template.document.languageId = 'vue'

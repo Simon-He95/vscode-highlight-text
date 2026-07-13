@@ -7,6 +7,8 @@ export type WorkerMatchResults = MatchResult[] & { truncated?: boolean }
 export interface WorkerRequest {
   acceptedIntervals?: Array<[number, number]>
   acceptedMatchOffset?: number
+  artificialEnd?: boolean
+  artificialStart?: boolean
   cacheGeneration?: number
   ignores: CompiledPattern[]
   includeFullSpan?: boolean
@@ -127,7 +129,7 @@ parentPort.on('message', ({ id, request, reset }) => {
     const text = entry.text
     const ignoreCache = entry.ignoreCache
     const maxIgnoreMatches = Math.max(request.maxMatches, 1000)
-    const ignoreKey = JSON.stringify([request.ignores, maxIgnoreMatches])
+    const ignoreKey = JSON.stringify([request.ignores, maxIgnoreMatches, request.artificialStart, request.artificialEnd])
     let ignoreEntry = ignoreCache.get(ignoreKey)
     if (!ignoreEntry) {
       const ignored = []
@@ -135,7 +137,11 @@ parentPort.on('message', ({ id, request, reset }) => {
         const regex = new RegExp(pattern.source, pattern.flags)
         const collected = collect(regex, text, maxIgnoreMatches, (match) => {
           const span = match.indices && match.indices[0]
-          if (span) {
+          if (
+            span
+            && !(request.artificialStart && span[0] === 0)
+            && !(request.artificialEnd && span[1] === text.length)
+          ) {
             if (ignored.length >= MAX_IGNORE_INTERVALS) {
               const error = new Error('Ignore patterns exceeded ' + MAX_IGNORE_INTERVALS + ' total intervals')
               error.code = 'IGNORE_LIMIT'

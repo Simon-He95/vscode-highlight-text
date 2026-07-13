@@ -167,9 +167,9 @@ function getScanSlices(editor: TextEditor): ScanPlan {
       if (probe.length === 2 && probe.charCodeAt(0) >= 0xD800 && probe.charCodeAt(0) <= 0xDBFF && probe.charCodeAt(1) >= 0xDC00 && probe.charCodeAt(1) <= 0xDFFF)
         scanEnd--
     }
-    if (scanStart === context.visible.start && scanStart > 0)
+    if (scanStart > 0)
       scanStart = previousCodePointOffset(document, scanStart)
-    if (scanEnd === context.visible.end && scanEnd < documentEnd)
+    if (scanEnd < documentEnd)
       scanEnd = nextCodePointOffset(document, scanEnd, documentEnd)
     return {
       acceptedIntervals: [[context.visible.start - scanStart, context.visible.end - scanStart] as [number, number]],
@@ -202,6 +202,8 @@ export async function scanRule(
   const matches = await executor.execute({
     acceptedIntervals: slice.acceptedIntervals,
     acceptedMatchOffset,
+    artificialEnd: slice.artificialEnd,
+    artificialStart: slice.artificialStart,
     ignores: rule.ignores,
     includeFullSpan: true,
     maxMatches,
@@ -238,6 +240,68 @@ export async function scanRule(
 
 const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
 
+function isAsciiTagNameCharacter(character: string): boolean {
+  return character === '-'
+    || character === '_'
+    || (character >= '0' && character <= '9')
+    || (character >= 'a' && character <= 'z')
+}
+
+export function containsVueTsxBlock(text: string): boolean {
+  const lower = text.toLowerCase()
+  let cursor = 0
+  while (cursor < lower.length) {
+    const start = lower.indexOf('<', cursor)
+    if (start < 0)
+      return false
+    const isScript = lower.startsWith('<script', start)
+    const isTemplate = !isScript && lower.startsWith('<template', start)
+    if (!isScript && !isTemplate) {
+      cursor = start + 1
+      continue
+    }
+    const nameEnd = start + (isScript ? 7 : 9)
+    const boundary = lower[nameEnd]
+    if (boundary && isAsciiTagNameCharacter(boundary)) {
+      cursor = nameEnd
+      continue
+    }
+    const limit = Math.min(lower.length, start + 4_097)
+    let end = -1
+    let nestedStart = -1
+    let quote = ''
+    for (let index = nameEnd; index < limit; index++) {
+      const character = lower[index]
+      if (quote) {
+        if (character === quote)
+          quote = ''
+        continue
+      }
+      if (character === '"' || character === '\'') {
+        quote = character
+        continue
+      }
+      if (character === '>') {
+        end = index
+        break
+      }
+      if (character === '<') {
+        nestedStart = index
+        break
+      }
+    }
+    if (end < 0) {
+      cursor = nestedStart >= 0 ? nestedStart : limit
+      continue
+    }
+    const tag = lower.slice(nameEnd, end)
+    if (/\blang\s*=\s*["']tsx["']/.test(tag))
+      return true
+    cursor = end + 1
+  }
+  return false
+}
+
 export function getRuleLanguageId(document: TextDocument): string {
   if (document.languageId !== 'vue')
     return document.languageId
@@ -250,20 +314,12 @@ export function getRuleLanguageId(document: TextDocument): string {
     MAX_VUE_LANGUAGE_DETECTION_SIZE,
   )
   const blockSize = 100_000
-  let carry = ''
-  let result = document.languageId
+  const chunks: string[] = []
   for (let start = 0; start < documentEnd; start += blockSize) {
     const end = Math.min(documentEnd, start + blockSize)
-    const chunk = document.getText(new Range(document.positionAt(start), document.positionAt(end)))
-    const candidate = carry + chunk
-    if (/<(?:script|template)\b[^>]*\slang\s*=\s*["']tsx["']/i.test(candidate)) {
-      result = 'vuetsx'
-      break
-    }
-    const lastOpen = candidate.lastIndexOf('<')
-    const lastClose = candidate.lastIndexOf('>')
-    carry = lastOpen > lastClose ? candidate.slice(Math.max(lastOpen, candidate.length - 10_000)) : ''
+    chunks.push(document.getText(new Range(document.positionAt(start), document.positionAt(end))))
   }
+  const result = containsVueTsxBlock(chunks.join('')) ? 'vuetsx' : document.languageId
   languageDetectionCache.set(document, { languageId: document.languageId, result, version: document.version })
   return result
 }
