@@ -46,9 +46,38 @@ const { parentPort } = require('node:worker_threads')
 let textCache = new Map()
 let cachedGeneration = -1
 let cachedTextUnits = 0
+let cachedIgnoreIntervalCount = 0
+let cachedIgnoreTextUnits = 0
 const MAX_IGNORE_INTERVALS = 10000
 const MAX_CACHED_IGNORE_INTERVALS = 20000
 const MAX_CACHED_TEXT_UNITS = 2000000
+
+function deleteTextEntry(key) {
+  const entry = textCache.get(key)
+  if (!entry)
+    return
+  cachedTextUnits -= entry.text.length
+  cachedIgnoreIntervalCount -= entry.ignoreCacheIntervalCount
+  cachedIgnoreTextUnits -= entry.ignoreCacheTextUnits
+  textCache.delete(key)
+}
+
+function deleteOldestIgnoreEntry(targetEntry) {
+  const entries = targetEntry ? [targetEntry] : textCache.values()
+  for (const entry of entries) {
+    const oldest = entry.ignoreCache.keys().next()
+    if (oldest.done)
+      continue
+    const removed = entry.ignoreCache.get(oldest.value)
+    entry.ignoreCacheIntervalCount -= removed.intervals.length
+    entry.ignoreCacheTextUnits -= removed.maskedText.length
+    cachedIgnoreIntervalCount -= removed.intervals.length
+    cachedIgnoreTextUnits -= removed.maskedText.length
+    entry.ignoreCache.delete(oldest.value)
+    return true
+  }
+  return false
+}
 
 function advanceStringIndex(text, index, unicode) {
   if (!unicode)
@@ -99,6 +128,8 @@ parentPort.on('message', ({ id, request, reset }) => {
     cachedGeneration = reset.cacheGeneration
     textCache = new Map()
     cachedTextUnits = 0
+    cachedIgnoreIntervalCount = 0
+    cachedIgnoreTextUnits = 0
     return
   }
   parentPort.postMessage({ id, started: true })
@@ -107,23 +138,26 @@ parentPort.on('message', ({ id, request, reset }) => {
       cachedGeneration = request.cacheGeneration
       textCache = new Map()
       cachedTextUnits = 0
+      cachedIgnoreIntervalCount = 0
+      cachedIgnoreTextUnits = 0
     }
     const textKey = request.textKey || 'default'
     let entry = textCache.get(textKey)
     if (request.text !== undefined) {
       if (entry)
-        cachedTextUnits -= entry.text.length
+        deleteTextEntry(textKey)
       entry = { text: request.text, ignoreCache: new Map(), ignoreCacheIntervalCount: 0, ignoreCacheTextUnits: 0 }
-      textCache.delete(textKey)
       textCache.set(textKey, entry)
       cachedTextUnits += request.text.length
       while (textCache.size > 4 || cachedTextUnits > MAX_CACHED_TEXT_UNITS) {
         const oldest = textCache.keys().next()
         if (oldest.done || oldest.value === textKey && textCache.size === 1)
           break
-        const removed = textCache.get(oldest.value)
-        cachedTextUnits -= removed.text.length
-        textCache.delete(oldest.value)
+        deleteTextEntry(oldest.value)
+      }
+      while (cachedTextUnits + cachedIgnoreTextUnits > MAX_CACHED_TEXT_UNITS) {
+        if (!deleteOldestIgnoreEntry())
+          break
       }
     }
     if (!entry)
@@ -179,23 +213,28 @@ parentPort.on('message', ({ id, request, reset }) => {
         cursor = end
       }
       maskedText += text.slice(cursor)
-      while (ignoreCache.size && (
-        ignoreCache.size >= 100
-        || entry.ignoreCacheIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS
-        || entry.ignoreCacheTextUnits + maskedText.length > MAX_CACHED_TEXT_UNITS
-      )) {
-        const oldest = ignoreCache.keys().next()
-        if (oldest.done)
+      while (ignoreCache.size >= 100) {
+        if (!deleteOldestIgnoreEntry(entry))
           break
-        const oldestEntry = ignoreCache.get(oldest.value)
-        entry.ignoreCacheIntervalCount -= oldestEntry.intervals.length
-        entry.ignoreCacheTextUnits -= oldestEntry.maskedText.length
-        ignoreCache.delete(oldest.value)
+      }
+      while (
+        cachedIgnoreIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS
+        || cachedTextUnits + cachedIgnoreTextUnits + maskedText.length > MAX_CACHED_TEXT_UNITS
+      ) {
+        if (!deleteOldestIgnoreEntry())
+          break
       }
       ignoreEntry = { intervals: mergedIgnored, maskedText }
-      ignoreCache.set(ignoreKey, ignoreEntry)
-      entry.ignoreCacheIntervalCount += mergedIgnored.length
-      entry.ignoreCacheTextUnits += maskedText.length
+      if (
+        cachedIgnoreIntervalCount + mergedIgnored.length <= MAX_CACHED_IGNORE_INTERVALS
+        && cachedTextUnits + cachedIgnoreTextUnits + maskedText.length <= MAX_CACHED_TEXT_UNITS
+      ) {
+        ignoreCache.set(ignoreKey, ignoreEntry)
+        entry.ignoreCacheIntervalCount += mergedIgnored.length
+        entry.ignoreCacheTextUnits += maskedText.length
+        cachedIgnoreIntervalCount += mergedIgnored.length
+        cachedIgnoreTextUnits += maskedText.length
+      }
     }
     const mergedIgnored = ignoreEntry.intervals
     const maskedText = ignoreEntry.maskedText

@@ -1046,6 +1046,50 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('keeps oversized ignore masks functional without retaining them beyond the unified cache budget', async () => {
+    const executor = new RegexExecutor(2_000)
+    const text = `TARGET${'x'.repeat(1_050_000)}`
+    const request = {
+      ignores: Array.from({ length: 100 }, (_, index) => ({ source: `absent-${index}`, flags: 'gd' })),
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text,
+      textKey: 'unified-cache-budget',
+    }
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 6]] }])
+    await expect(executor.execute(request, undefined, undefined, 1)).rejects.toThrow('remaining 1ms scan budget')
+    executor.dispose()
+  })
+
+  it('applies the ignore variant cap without evicting another text cache', async () => {
+    const executor = new RegexExecutor(2_000)
+    const retainedText = `TARGET${'x'.repeat(500_000)}`
+    const retainedRequest = {
+      ignores: Array.from({ length: 100 }, (_, index) => ({ source: `missing-${index}`, flags: 'gd' })),
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: retainedText,
+      textKey: 'retained-text',
+    }
+    await expect(executor.execute(retainedRequest)).resolves.toEqual([{ spans: [[0, 6]] }])
+
+    for (let variant = 0; variant <= 100; variant++) {
+      await expect(executor.execute({
+        ignores: [{ source: `missing-variant-${variant}`, flags: 'gd' }],
+        maxMatches: 10,
+        pattern: { source: 'TARGET', flags: 'gd' },
+        targetGroups: [0],
+        text: 'TARGET',
+        textKey: 'variant-text',
+      })).resolves.toEqual([{ spans: [[0, 6]] }])
+    }
+
+    await expect(executor.execute(retainedRequest, undefined, undefined, 10)).resolves.toEqual([{ spans: [[0, 6]] }])
+    executor.dispose()
+  })
+
   it('does not resend cached text when slice keys alternate', async () => {
     const messages: any[] = []
     class FakeWorker extends EventEmitter {
