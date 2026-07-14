@@ -229,9 +229,9 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 
 ## Performance and limits
 
-To keep the VS Code Extension Host responsive, highlighting is bounded: 200,000 UTF-16 units per visible scan, the first 1,000 accepted matches per rule (additional matches are truncated with a warning), 10,000 retained ranges per completed refresh, 1,000 ms of cumulative worker regex execution per scan chunk, 500 ms per worker job, a 30-second timeout-only rule cooldown, 300 layers per profile, and 1,500 decoration types per active manager. Time-limited scans continue automatically from the next unprocessed rule. The extension uses one shared regex worker, so visible editors do not run regex workers concurrently. Vue TSX detection examines at most the first 300,000 UTF-16 units and is skipped when Vue and Vue TSX rules are identical.
+Large files, expensive regular expressions, and unusually large rule sets may be limited automatically to keep the VS Code Extension Host responsive. Time-limited scans continue from the next unprocessed rule, and limit or configuration problems are reported through VS Code warning messages.
 
-For React aliases, overlap priority is deterministic: the exact language (`javascriptreact` or `typescriptreact`) wins over its sibling alias, which wins over generic `react`. Limit or configuration problems are reported through VS Code warning messages.
+For React aliases, overlap priority is deterministic: the exact language (`javascriptreact` or `typescriptreact`) wins over its sibling alias, which wins over generic `react`.
 
 ## Show your style
 

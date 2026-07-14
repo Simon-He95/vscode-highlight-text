@@ -899,12 +899,17 @@ export function activate(context: ExtensionContext): void {
     }),
     workspace.onDidCloseTextDocument((document) => {
       failures.clearDocument(document)
-      for (const editor of window.visibleTextEditors) {
-        if (editor.document === document) {
-          scheduler.invalidate(editor)
-          ruleSnapshots.delete(editor)
-          manager.releaseEditor(editor)
-        }
+      for (const editor of [...scheduler.keys]) {
+        if (editor.document !== document)
+          continue
+        scheduler.remove(editor)
+        const retryTimer = retryTimers.get(editor)
+        if (retryTimer)
+          clearTimeout(retryTimer)
+        retryTimers.delete(editor)
+        ruleSnapshots.delete(editor)
+        scanSessions.delete(editor)
+        manager.releaseEditor(editor)
       }
     }),
     workspace.onDidOpenTextDocument((document) => {

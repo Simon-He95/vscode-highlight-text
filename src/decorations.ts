@@ -2,8 +2,6 @@ import type { DecorationRenderOptions, Range, TextEditor, TextEditorDecorationTy
 import { window } from 'vscode'
 
 const MAX_MANAGER_DECORATION_TYPES = 1_500
-let globallyAllocatedDecorationTypes = 0
-const MAX_TRANSITION_DECORATION_TYPES = MAX_MANAGER_DECORATION_TYPES * 2
 
 type DecorationLayer = string | { id: string, styleId: string }
 
@@ -33,12 +31,8 @@ export class DecorationManager {
       const normalized = typeof layer === 'string' ? { id: layer, styleId: layer } : layer
       return [normalized.id, normalized]
     })).values()].filter(layer => this.styles.has(layer.styleId))
-    if (
-      this.typeCount + layers.length > MAX_MANAGER_DECORATION_TYPES
-      || globallyAllocatedDecorationTypes + layers.length > MAX_TRANSITION_DECORATION_TYPES
-    ) {
+    if (this.typeCount + layers.length > MAX_MANAGER_DECORATION_TYPES)
       throw new Error(`Decoration type budget exceeded: at most ${MAX_MANAGER_DECORATION_TYPES} active types are allowed`)
-    }
     const types = new Map<string, TextEditorDecorationType>()
     try {
       // Keep high-to-low creation order: current VS Code prepends decoration CSS rules,
@@ -52,7 +46,6 @@ export class DecorationManager {
         }
       }
       this.typeCount += types.size
-      globallyAllocatedDecorationTypes += types.size
       this.profiles.set(profileId, { disposed: false, editors: new Set(), types })
     }
     catch (error) {
@@ -179,7 +172,6 @@ export class DecorationManager {
       return
     profile.disposed = true
     this.typeCount -= profile.types.size
-    globallyAllocatedDecorationTypes -= profile.types.size
     this.disposeTypes(profile.types)
   }
 

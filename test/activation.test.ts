@@ -695,12 +695,14 @@ describe('extension activation orchestration', () => {
     editor.setDecorations.mockClear()
 
     editor.document.isClosed = true
+    window.visibleTextEditors = []
     await __events.closeDocument.fire(editor.document)
     expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
 
     editor.setDecorations.mockClear()
     editor.document.languageId = 'markdown'
     editor.document.isClosed = false
+    window.visibleTextEditors = [editor] as any
     await __events.openDocument.fire(editor.document)
     await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
 

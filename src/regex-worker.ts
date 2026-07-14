@@ -45,20 +45,25 @@ const WORKER_SOURCE = String.raw`
 const { parentPort } = require('node:worker_threads')
 let textCache = new Map()
 let cachedGeneration = -1
-let cachedTextUnits = 0
+let cachedTextBytes = 0
 let cachedIgnoreIntervalCount = 0
-let cachedIgnoreTextUnits = 0
+let cachedIgnoreBytes = 0
 const MAX_IGNORE_INTERVALS = 10000
 const MAX_CACHED_IGNORE_INTERVALS = 20000
-const MAX_CACHED_TEXT_UNITS = 2000000
+const MAX_CACHED_BYTES = 4000000
+const ESTIMATED_INTERVAL_BYTES = 16
+
+function estimateIgnoreEntryBytes(key, intervals, maskedText) {
+  return key.length * 2 + intervals.length * ESTIMATED_INTERVAL_BYTES + maskedText.length * 2
+}
 
 function deleteTextEntry(key) {
   const entry = textCache.get(key)
   if (!entry)
     return
-  cachedTextUnits -= entry.text.length
+  cachedTextBytes -= entry.text.length * 2
   cachedIgnoreIntervalCount -= entry.ignoreCacheIntervalCount
-  cachedIgnoreTextUnits -= entry.ignoreCacheTextUnits
+  cachedIgnoreBytes -= entry.ignoreCacheBytes
   textCache.delete(key)
 }
 
@@ -70,9 +75,9 @@ function deleteOldestIgnoreEntry(targetEntry) {
       continue
     const removed = entry.ignoreCache.get(oldest.value)
     entry.ignoreCacheIntervalCount -= removed.intervals.length
-    entry.ignoreCacheTextUnits -= removed.maskedText.length
+    entry.ignoreCacheBytes -= removed.estimatedBytes
     cachedIgnoreIntervalCount -= removed.intervals.length
-    cachedIgnoreTextUnits -= removed.maskedText.length
+    cachedIgnoreBytes -= removed.estimatedBytes
     entry.ignoreCache.delete(oldest.value)
     return true
   }
@@ -127,9 +132,9 @@ parentPort.on('message', ({ id, request, reset }) => {
   if (reset) {
     cachedGeneration = reset.cacheGeneration
     textCache = new Map()
-    cachedTextUnits = 0
+    cachedTextBytes = 0
     cachedIgnoreIntervalCount = 0
-    cachedIgnoreTextUnits = 0
+    cachedIgnoreBytes = 0
     return
   }
   parentPort.postMessage({ id, started: true })
@@ -137,25 +142,25 @@ parentPort.on('message', ({ id, request, reset }) => {
     if (request.cacheGeneration !== cachedGeneration) {
       cachedGeneration = request.cacheGeneration
       textCache = new Map()
-      cachedTextUnits = 0
+      cachedTextBytes = 0
       cachedIgnoreIntervalCount = 0
-      cachedIgnoreTextUnits = 0
+      cachedIgnoreBytes = 0
     }
     const textKey = request.textKey || 'default'
     let entry = textCache.get(textKey)
     if (request.text !== undefined) {
       if (entry)
         deleteTextEntry(textKey)
-      entry = { text: request.text, ignoreCache: new Map(), ignoreCacheIntervalCount: 0, ignoreCacheTextUnits: 0 }
+      entry = { text: request.text, ignoreCache: new Map(), ignoreCacheIntervalCount: 0, ignoreCacheBytes: 0 }
       textCache.set(textKey, entry)
-      cachedTextUnits += request.text.length
-      while (textCache.size > 4 || cachedTextUnits > MAX_CACHED_TEXT_UNITS) {
+      cachedTextBytes += request.text.length * 2
+      while (textCache.size > 4 || cachedTextBytes > MAX_CACHED_BYTES) {
         const oldest = textCache.keys().next()
         if (oldest.done || oldest.value === textKey && textCache.size === 1)
           break
         deleteTextEntry(oldest.value)
       }
-      while (cachedTextUnits + cachedIgnoreTextUnits > MAX_CACHED_TEXT_UNITS) {
+      while (cachedTextBytes + cachedIgnoreBytes > MAX_CACHED_BYTES) {
         if (!deleteOldestIgnoreEntry())
           break
       }
@@ -217,23 +222,24 @@ parentPort.on('message', ({ id, request, reset }) => {
         if (!deleteOldestIgnoreEntry(entry))
           break
       }
+      const estimatedBytes = estimateIgnoreEntryBytes(ignoreKey, mergedIgnored, maskedText)
       while (
         cachedIgnoreIntervalCount + mergedIgnored.length > MAX_CACHED_IGNORE_INTERVALS
-        || cachedTextUnits + cachedIgnoreTextUnits + maskedText.length > MAX_CACHED_TEXT_UNITS
+        || cachedTextBytes + cachedIgnoreBytes + estimatedBytes > MAX_CACHED_BYTES
       ) {
         if (!deleteOldestIgnoreEntry())
           break
       }
-      ignoreEntry = { intervals: mergedIgnored, maskedText }
+      ignoreEntry = { estimatedBytes, intervals: mergedIgnored, maskedText }
       if (
         cachedIgnoreIntervalCount + mergedIgnored.length <= MAX_CACHED_IGNORE_INTERVALS
-        && cachedTextUnits + cachedIgnoreTextUnits + maskedText.length <= MAX_CACHED_TEXT_UNITS
+        && cachedTextBytes + cachedIgnoreBytes + estimatedBytes <= MAX_CACHED_BYTES
       ) {
         ignoreCache.set(ignoreKey, ignoreEntry)
         entry.ignoreCacheIntervalCount += mergedIgnored.length
-        entry.ignoreCacheTextUnits += maskedText.length
+        entry.ignoreCacheBytes += estimatedBytes
         cachedIgnoreIntervalCount += mergedIgnored.length
-        cachedIgnoreTextUnits += maskedText.length
+        cachedIgnoreBytes += estimatedBytes
       }
     }
     const mergedIgnored = ignoreEntry.intervals

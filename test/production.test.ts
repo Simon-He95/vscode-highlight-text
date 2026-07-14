@@ -1062,6 +1062,37 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it('charges ignore cache keys to the unified byte budget', async () => {
+    const executor = new RegexExecutor(2_000)
+    const retainedText = `TARGET${'x'.repeat(500_000)}`
+    const retainedRequest = {
+      ignores: Array.from({ length: 100 }, () => ({ source: 'x(?=y)', flags: 'gd' })),
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: retainedText,
+      textKey: 'key-budget-retained',
+    }
+    await expect(executor.execute(retainedRequest)).resolves.toEqual([{ spans: [[0, 6]] }])
+
+    for (let variant = 0; variant < 11; variant++) {
+      await expect(executor.execute({
+        ignores: Array.from({ length: 100 }, (_, index) => ({
+          source: `${variant}-${index}-${'q'.repeat(980)}`,
+          flags: 'gd',
+        })),
+        maxMatches: 10,
+        pattern: { source: 'TARGET', flags: 'gd' },
+        targetGroups: [0],
+        text: 'TARGET',
+        textKey: 'large-key-variants',
+      })).resolves.toEqual([{ spans: [[0, 6]] }])
+    }
+
+    await expect(executor.execute(retainedRequest, undefined, undefined, 50)).rejects.toThrow('remaining 50ms scan budget')
+    executor.dispose()
+  })
+
   it('applies the ignore variant cap without evicting another text cache', async () => {
     const executor = new RegexExecutor(2_000)
     const retainedText = `TARGET${'x'.repeat(500_000)}`
@@ -1625,16 +1656,17 @@ describe('decoration lifecycle', () => {
     manager.dispose()
   })
 
-  it('keeps global transition accounting aligned across manager lifecycles', () => {
-    const created = []
-    for (let managerIndex = 0; managerIndex < 3; managerIndex++) {
-      const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+  it('keeps decoration budgets isolated across manager lifecycles', () => {
+    const managers = Array.from({ length: 3 }, () => new DecorationManager(
+      new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]),
+    ))
+    for (const [managerIndex, manager] of managers.entries()) {
       const layers = Array.from({ length: 1_500 }, (_, index) => ({ id: `${managerIndex}-${index}`, styleId: 'a' }))
       expect(() => manager.prepareProfile(`profile-${managerIndex}`, layers)).not.toThrow()
-      created.push(...vi.mocked(window.createTextEditorDecorationType).mock.results.slice(managerIndex * 1_500).map(result => result.value))
-      manager.dispose()
     }
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(4_500)
+    const created = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    managers.forEach(manager => manager.dispose())
     created.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
   })
 
