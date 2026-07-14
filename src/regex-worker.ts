@@ -86,8 +86,12 @@ function collect(regex, text, limit, onMatch, maxRetries = 0, maxRawIterations =
     }
   }
   const rawTruncated = !exhausted && rawIterations >= maxRawIterations
-  const hasMore = !rawTruncated && (count >= limit || retries > maxRetries) && regex.exec(text) !== null
-  return { count, rawTruncated, retryTruncated: retries > maxRetries && hasMore, truncated: count >= limit && hasMore }
+  return {
+    count,
+    rawTruncated,
+    retryTruncated: !exhausted && retries > maxRetries,
+    truncated: !exhausted && count >= limit,
+  }
 }
 
 parentPort.on('message', ({ id, request, reset }) => {
@@ -170,7 +174,7 @@ parentPort.on('message', ({ id, request, reset }) => {
       let maskedText = ''
       let cursor = 0
       for (const [start, end] of mergedIgnored) {
-        const ignoredText = text.slice(start, end).replace(/[^\r\n]/g, ' ')
+        const ignoredText = text.slice(start, end).replace(/[^\r\n\u2028\u2029]/g, ' ')
         maskedText += text.slice(cursor, start) + ignoredText
         cursor = end
       }

@@ -405,7 +405,7 @@ describe('scan session state', () => {
   it('clears partial candidates before advancing a skipped rule', () => {
     const session = {
       candidateKeys: new Set(['old']),
-      candidateSnapshot: new Map([['old', [range(0, 1)]]]),
+      candidateSnapshot: new Map([['old', [{ end: 1, start: 0 }]]]),
       currentRuleMatchCount: 7,
       nextSliceIndex: 2,
     }
@@ -769,15 +769,28 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
-  it('rejects a rule when its ignore scan is truncated', async () => {
+  it('rejects a rule conservatively when its ignore scan reaches the limit', async () => {
     const executor = new RegexExecutor(500)
     await expect(executor.execute({
-      ignores: [{ source: 'x|TARGET', flags: 'gd' }],
+      ignores: [{ source: 'x', flags: 'gd' }],
       maxMatches: 10,
       pattern: { source: 'TARGET', flags: 'gd' },
       targetGroups: [0],
-      text: `${'x'.repeat(1_001)}TARGET`,
+      text: `${'x'.repeat(1_000)}TARGET`,
     })).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+    executor.dispose()
+  })
+
+  it.each(['\\u2028', '\\u2029'])('preserves JavaScript line terminator %s while masking ignored text', async (separatorSource) => {
+    const executor = new RegexExecutor(500)
+    const separator = separatorSource === '\\u2028' ? '\u2028' : '\u2029'
+    await expect(executor.execute({
+      ignores: [{ source: `IGNORE${separatorSource}`, flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '^TARGET', flags: 'gmd' },
+      targetGroups: [0],
+      text: `IGNORE${separator}TARGET`,
+    })).resolves.toEqual([{ spans: [[7, 13]] }])
     executor.dispose()
   })
 
@@ -789,7 +802,7 @@ describe('regex execution', () => {
       maxMatches: 1_000,
       pattern: { source: 'TARGET', flags: 'gd' },
       targetGroups: [0],
-      text: `${characters.map(character => character.repeat(1_000)).join('')}TARGET`,
+      text: `${characters.map(character => character.repeat(999)).join('')}TARGET`,
     })).rejects.toThrow('Ignore patterns exceeded 10000 total intervals')
     executor.dispose()
   })

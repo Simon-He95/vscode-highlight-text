@@ -48,10 +48,15 @@ interface RuleSnapshot {
   rangesByStyle: Map<string, VscodeRange[]>
 }
 
+interface PendingRange {
+  end: number
+  start: number
+}
+
 interface ScanSession {
   acceptedRangeKeys: Set<string>
   candidateKeys: Set<string>
-  candidateSnapshot: Map<string, VscodeRange[]>
+  candidateSnapshot: Map<string, PendingRange[]>
   currentRuleMatchCount: number
   failedRuleIds: Set<string>
   continuationCount: number
@@ -587,6 +592,7 @@ export function activate(context: ExtensionContext): void {
 
       let candidateExceeded = false
       let ruleFailed = false
+      const remainingRangeBudget = budget.remainingRanges
       while (session.nextSliceIndex < scanPlan.slices.length) {
         if (!isCurrent())
           return
@@ -632,13 +638,13 @@ export function activate(context: ExtensionContext): void {
             const rangeKey = `${match.styleId}:${match.start}-${match.end}`
             if (session.acceptedRangeKeys.has(rangeKey) || session.candidateKeys.has(rangeKey))
               continue
-            if (session.candidateKeys.size >= MAX_TOTAL_RANGES) {
+            if (session.candidateKeys.size >= remainingRangeBudget) {
               candidateExceeded = true
               break
             }
             session.candidateKeys.add(rangeKey)
             const ranges = session.candidateSnapshot.get(match.styleId) ?? []
-            ranges.push(new Range(document.positionAt(match.start), document.positionAt(match.end)))
+            ranges.push({ end: match.end, start: match.start })
             session.candidateSnapshot.set(match.styleId, ranges)
           }
           session.currentRuleMatchCount += scanResult.acceptedMatchCount
@@ -704,7 +710,7 @@ export function activate(context: ExtensionContext): void {
       if (!ruleFailed) {
         if (candidateExceeded) {
           session.scannedSnapshots.set(rule.id, new Map())
-          warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: it exceeds ${MAX_TOTAL_RANGES} unique ranges`)
+          warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: it exceeds the remaining ${remainingRangeBudget} range budget`)
         }
         else {
           const newKeys = [...session.candidateKeys].filter(key => !session.acceptedRangeKeys.has(key))
@@ -717,7 +723,13 @@ export function activate(context: ExtensionContext): void {
               budget.consumeRange()
               session.acceptedRangeKeys.add(key)
             }
-            session.scannedSnapshots.set(rule.id, session.candidateSnapshot)
+            const rangesByStyle = new Map<string, VscodeRange[]>()
+            for (const [styleId, pendingRanges] of session.candidateSnapshot) {
+              rangesByStyle.set(styleId, pendingRanges.map(({ end, start }) => (
+                new Range(document.positionAt(start), document.positionAt(end))
+              )))
+            }
+            session.scannedSnapshots.set(rule.id, rangesByStyle)
           }
         }
       }

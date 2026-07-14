@@ -391,6 +391,28 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('does not construct ranges for a rule that exceeds the remaining refresh budget', async () => {
+    const light: Record<string, string[]> = {}
+    for (let index = 0; index < 10; index++)
+      light[`rgb(${index},0,0)`] = ['x']
+    light.blue = ['y']
+    light.green = ['TARGET']
+    configuration.rules = { plaintext: { light } }
+    const editor = createEditor(`${'x'.repeat(999)}${'y'.repeat(1_000)}TARGET`, 'remaining-range-budget')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('remaining 10 range budget')), 3_000)
+    const types = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    const blueType = types.find(type => type.options.color === 'blue')
+    const greenType = types.find(type => type.options.color === 'green')
+    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(greenType, expect.arrayContaining([expect.anything()])))
+    expect(editor.setDecorations.mock.calls.some(([type, ranges]) => type === blueType && ranges.length > 0)).toBe(false)
+    expect(editor.document.positionAt.mock.calls.length).toBeLessThan(20_100)
+    disposeContext(context)
+  })
+
   it('does not commit a snapshot when the visible scan exceeds its character budget', async () => {
     const editor = createEditor('foo', 'scan-budget')
     window.visibleTextEditors = [editor] as any
