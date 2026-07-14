@@ -270,6 +270,40 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('reuses decoration types across edits and replaces them on configuration reload', async () => {
+    const editor = createEditor('foo', 'configuration-lifecycle')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    const redType = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+
+    for (let index = 0; index < 2; index++) {
+      editor.setText(`foo ${index}`)
+      await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+      await waitFor(() => expect(editor.setDecorations.mock.calls.some(([type, ranges]) => type === redType && ranges.length > 0)).toBe(true))
+    }
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    expect(redType.dispose).not.toHaveBeenCalled()
+
+    configuration.rules = { plaintext: { light: { green: ['foo'] } } }
+    await __events.configuration.fire({ affectsConfiguration: (section: string) => section === 'vscode-highlight-text.rules' })
+    await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2))
+    const greenType = vi.mocked(window.createTextEditorDecorationType).mock.results[1].value
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([type, ranges]) => type === greenType && ranges.length > 0)).toBe(true))
+    expect(redType.dispose).toHaveBeenCalledTimes(1)
+
+    editor.setText('foo after reload')
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([type, ranges]) => type === greenType && ranges.length > 0)).toBe(true))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
+
+    disposeContext(context)
+    expect(greenType.dispose).toHaveBeenCalledTimes(1)
+  })
+
   it('cancels a duplicate timed-out rule queued by a split editor', async () => {
     configuration.rules = { plaintext: { light: { red: ['(a+)+$'], green: ['NORMAL'] } } }
     const first = createEditor(`${'a'.repeat(20_000)}b NORMAL`, 'split-timeout')
