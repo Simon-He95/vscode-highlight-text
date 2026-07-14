@@ -1050,7 +1050,7 @@ describe('regex execution', () => {
     const executor = new RegexExecutor(2_000)
     const text = `TARGET${'x'.repeat(1_050_000)}`
     const request = {
-      ignores: Array.from({ length: 100 }, (_, index) => ({ source: `absent-${index}`, flags: 'gd' })),
+      ignores: Array.from({ length: 100 }, () => ({ source: 'x(?=y)', flags: 'gd' })),
       maxMatches: 10,
       pattern: { source: 'TARGET', flags: 'gd' },
       targetGroups: [0],
@@ -1058,7 +1058,7 @@ describe('regex execution', () => {
       textKey: 'unified-cache-budget',
     }
     await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 6]] }])
-    await expect(executor.execute(request, undefined, undefined, 1)).rejects.toThrow('remaining 1ms scan budget')
+    await expect(executor.execute(request, undefined, undefined, 50)).rejects.toThrow('remaining 50ms scan budget')
     executor.dispose()
   })
 
