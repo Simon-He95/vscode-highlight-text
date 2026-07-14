@@ -1528,6 +1528,20 @@ describe('decoration lifecycle', () => {
     manager.dispose()
   })
 
+  it('keeps profile disposal idempotent during reentrant manager cleanup', () => {
+    const type = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType).mockReturnValue(type as any)
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.reserveProfile(editor, 'reentrant', ['a'])
+    type.dispose.mockImplementationOnce(() => manager.dispose())
+
+    manager.releaseEditor(editor)
+
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
   it('shares a profile across split editors and disposes it after the last editor leaves', () => {
     const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
     const first = new MockEditor() as any

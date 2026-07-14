@@ -8,6 +8,7 @@ const MAX_TRANSITION_DECORATION_TYPES = MAX_MANAGER_DECORATION_TYPES * 2
 type DecorationLayer = string | { id: string, styleId: string }
 
 interface DecorationProfile {
+  disposed: boolean
   editors: Set<TextEditor>
   types: Map<string, TextEditorDecorationType>
 }
@@ -52,7 +53,7 @@ export class DecorationManager {
       }
       this.typeCount += types.size
       globallyAllocatedDecorationTypes += types.size
-      this.profiles.set(profileId, { editors: new Set(), types })
+      this.profiles.set(profileId, { disposed: false, editors: new Set(), types })
     }
     catch (error) {
       this.disposeTypes(types)
@@ -174,6 +175,9 @@ export class DecorationManager {
   }
 
   private disposeProfile(profile: DecorationProfile): void {
+    if (profile.disposed)
+      return
+    profile.disposed = true
     this.typeCount -= profile.types.size
     globallyAllocatedDecorationTypes -= profile.types.size
     this.disposeTypes(profile.types)
