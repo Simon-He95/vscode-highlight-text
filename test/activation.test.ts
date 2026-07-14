@@ -134,8 +134,14 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('does not detect Vue TSX when Vue and Vue TSX rules are identical', async () => {
-    configuration.rules = { 'vue|vuetsx': { light: { red: ['foo'] } } }
+  it.each([
+    { 'vue|vuetsx': { light: { red: ['foo'] } } },
+    {
+      vue: { light: { red: ['foo'] } },
+      vuetsx: { light: { red: [['foo', 'mg']] } },
+    },
+  ])('does not detect Vue TSX when Vue and Vue TSX rules are semantically identical', async (rules) => {
+    configuration.rules = rules
     const editor = createEditor('foo', 'same-vue-rules')
     editor.document.languageId = 'vue'
     window.visibleTextEditors = [editor] as any
@@ -144,6 +150,35 @@ describe('extension activation orchestration', () => {
     activate(context)
     await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
     expect(editor.document.getText).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+  })
+
+  it('detects Vue TSX when its semantic rules contain an additional rule', async () => {
+    configuration.rules = {
+      vue: { light: { red: ['foo'] } },
+      vuetsx: { light: { blue: ['foo'] } },
+    }
+    const editor = createEditor('<script lang="tsx">foo</script>', 'different-vue-rules')
+    editor.document.languageId = 'vue'
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(vi.mocked(window.createTextEditorDecorationType).mock.results.some(result => result.value.options.color === 'blue')).toBe(true))
+    const blueType = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value).find(type => type.options.color === 'blue')
+    await waitFor(() => expect(editor.setDecorations).toHaveBeenCalledWith(blueType, expect.arrayContaining([expect.anything()])))
+    expect(editor.document.getText.mock.calls.length).toBeGreaterThan(1)
+    disposeContext(context)
+  })
+
+  it('keeps highlighting when a style contains duplicate patterns', async () => {
+    configuration.rules = { plaintext: { light: { red: ['foo', ['foo', 'mg']] } } }
+    const editor = createEditor('foo', 'duplicate-patterns')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length === 1)).toBe(true))
     disposeContext(context)
   })
 

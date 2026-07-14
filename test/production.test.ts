@@ -275,6 +275,14 @@ describe('regex configuration', () => {
     expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern.source)).toEqual(['foo', 'gm'])
   })
 
+  it('deduplicates patterns after source and flag normalization', () => {
+    const compiled = compileConfig({ plaintext: { light: { red: ['foo', ['foo', 'mg']] } } })
+    const rules = getRulesForLanguage(compiled, 'plaintext', false)
+    expect(rules).toHaveLength(1)
+    expect(new Set(rules.map(rule => rule.id)).size).toBe(1)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Duplicate pattern for plaintext.light.red was ignored'))
+  })
+
   it('fails closed when any ignoreReg pattern is invalid', () => {
     const invalidOnly = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['('] } } } })
     const mixed = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', '('] } } } })

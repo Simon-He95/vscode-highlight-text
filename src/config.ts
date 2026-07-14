@@ -294,14 +294,22 @@ function compileStyleRules(
       return []
   }
 
-  return patterns.flatMap((input) => {
+  const seenPatterns = new Set<string>()
+  return patterns.flatMap((input, patternIndex) => {
     try {
       const pattern = compilePattern(input)
+      const canonicalFlags = new RegExp(pattern.source, pattern.flags).flags
+      const patternKey = JSON.stringify([pattern.source, canonicalFlags])
+      if (seenPatterns.has(patternKey)) {
+        config.warnings.push(`Duplicate pattern for ${context} was ignored: /${pattern.source}/${canonicalFlags}`)
+        return []
+      }
+      seenPatterns.add(patternKey)
       if (!isRegexSafe(new RegExp(pattern.source, pattern.flags)))
         config.warnings.push(`Potentially expensive regular expression for ${context}: ${pattern.source}`)
       return [{
         context,
-        id: JSON.stringify([layerContextId, pattern.source, pattern.flags]),
+        id: JSON.stringify([layerContextId, patternIndex, pattern.source, canonicalFlags]),
         layerContextId,
         ignores,
         pattern,

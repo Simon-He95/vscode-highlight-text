@@ -369,13 +369,34 @@ function buildRuleSelection(config: CompiledConfig, languageId: string, dark: bo
 }
 
 const ruleSelectionCache = new WeakMap<CompiledConfig, Map<string, ReturnType<typeof buildRuleSelection>>>()
+const ruleFingerprintCache = new WeakMap<CompiledRule, string>()
+
+function getRuleFingerprint(rule: CompiledRule): string {
+  const cached = ruleFingerprintCache.get(rule)
+  if (cached)
+    return cached
+  const fingerprint = JSON.stringify([
+    rule.pattern.source,
+    [...rule.pattern.flags].sort().join(''),
+    rule.ignores.map(pattern => [pattern.source, [...pattern.flags].sort().join('')]),
+    rule.targets.map(target => [target.groupIndex ?? null, target.styleId]),
+  ])
+  ruleFingerprintCache.set(rule, fingerprint)
+  return fingerprint
+}
+
+function haveEquivalentRules(left: CompiledRule[], right: CompiledRule[]): boolean {
+  const leftFingerprints = [...new Set(left.map(getRuleFingerprint))]
+  const rightFingerprints = [...new Set(right.map(getRuleFingerprint))]
+  return leftFingerprints.length === rightFingerprints.length
+    && leftFingerprints.every((fingerprint, index) => fingerprint === rightFingerprints[index])
+}
 
 function getRuleSelection(config: CompiledConfig, document: TextDocument) {
   const dark = isDarkTheme()
   const vueRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vue', dark) : []
   const vueTsxRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vuetsx', dark) : []
-  const languageId = document.languageId === 'vue'
-    && (vueRules.length !== vueTsxRules.length || vueRules.some((rule, index) => rule !== vueTsxRules[index]))
+  const languageId = document.languageId === 'vue' && !haveEquivalentRules(vueRules, vueTsxRules)
     ? getRuleLanguageId(document)
     : document.languageId
   const key = `${languageId}:${dark ? 'dark' : 'light'}`
