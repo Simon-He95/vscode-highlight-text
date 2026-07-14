@@ -684,6 +684,20 @@ describe('regex execution', () => {
       text: 'foobar',
     })).resolves.toEqual([{ spans: [[3, 6]] }])
     await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(?<name>foo)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foo',
+    })).resolves.toEqual([{ spans: [[0, 3]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(😀)(foo)', flags: 'gdu' },
+      targetGroups: [1, 2],
+      text: '😀foo',
+    })).resolves.toEqual([{ spans: [[0, 2], [2, 5]] }])
+    await expect(executor.execute({
       ignores: [{ source: 'foo', flags: 'gd' }],
       maxMatches: 10,
       pattern: { source: 'foo', flags: 'gd' },
@@ -1287,6 +1301,13 @@ describe('regex execution', () => {
     activeController.abort()
     await expect(active).rejects.toSatisfy(isRegexExecutionAbortedError)
     expect(executor.pendingCount).toBe(0)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: 'TARGET',
+    })).resolves.toEqual([{ spans: [[0, 6]] }])
     executor.dispose()
   })
 })
@@ -1544,6 +1565,19 @@ describe('decoration lifecycle', () => {
       .toThrow('Decoration type budget exceeded')
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1_000)
     manager.dispose()
+  })
+
+  it('keeps global transition accounting aligned across manager lifecycles', () => {
+    const created = []
+    for (let managerIndex = 0; managerIndex < 3; managerIndex++) {
+      const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+      const layers = Array.from({ length: 1_500 }, (_, index) => ({ id: `${managerIndex}-${index}`, styleId: 'a' }))
+      expect(() => manager.prepareProfile(`profile-${managerIndex}`, layers)).not.toThrow()
+      created.push(...vi.mocked(window.createTextEditorDecorationType).mock.results.slice(managerIndex * 1_500).map(result => result.value))
+      manager.dispose()
+    }
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(4_500)
+    created.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
   })
 
   it('reuses types, batches ranges, and never recreates after dispose', () => {
