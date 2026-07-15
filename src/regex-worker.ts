@@ -31,8 +31,14 @@ interface WorkerResponse {
   truncated?: boolean
 }
 
+export interface RegexExecutionOptions {
+  deadlineKind: 'regex-timeout' | 'scan-budget'
+  timeoutMs: number
+}
+
 interface PendingJob {
   onAbort?: () => void
+  deadlineKind: RegexExecutionOptions['deadlineKind']
   executionTimeoutMs: number
   onExecutionComplete?: (durationMs: number) => void
   reject: (error: Error) => void
@@ -523,7 +529,7 @@ export class RegexExecutor {
     request: WorkerRequest,
     signal?: AbortSignal,
     onExecutionComplete?: (durationMs: number) => void,
-    executionTimeoutMs = this.timeoutMs,
+    options: RegexExecutionOptions = { deadlineKind: 'regex-timeout', timeoutMs: this.timeoutMs },
   ): Promise<WorkerMatchResults> {
     if (this.disposed || signal?.aborted)
       return Promise.reject(new RegexExecutionAbortedError())
@@ -531,7 +537,15 @@ export class RegexExecutor {
       return Promise.reject(new RegexExecutionInfrastructureError('Regular expression worker is temporarily unavailable', this.infrastructureBlockedUntil - Date.now()))
 
     return new Promise((resolve, reject) => {
-      const job: PendingJob = { executionTimeoutMs, onExecutionComplete, request, resolve, reject, signal }
+      const job: PendingJob = {
+        deadlineKind: options.deadlineKind,
+        executionTimeoutMs: options.timeoutMs,
+        onExecutionComplete,
+        request,
+        resolve,
+        reject,
+        signal,
+      }
       if (signal) {
         job.onAbort = () => this.cancel(job)
         signal.addEventListener('abort', job.onAbort, { once: true })
@@ -722,9 +736,9 @@ export class RegexExecutor {
           clearTimeout(timer)
         executionStartedAt = Date.now()
         timer = setTimeout(() => {
-          const error = job.executionTimeoutMs < this.timeoutMs
+          const error = job.deadlineKind === 'scan-budget'
             ? new RegexExecutionBudgetError(`Regular expression execution exceeded the remaining ${job.executionTimeoutMs}ms scan budget`)
-            : new RegexExecutionTimeoutError(this.timeoutMs)
+            : new RegexExecutionTimeoutError(job.executionTimeoutMs)
           finish(error, undefined, true)
         }, job.executionTimeoutMs)
         return

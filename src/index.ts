@@ -1,4 +1,5 @@
 import type { ExtensionContext, TextDocument, TextEditor, Range as VscodeRange } from 'vscode'
+import type { RegexExecutionOptions } from './regex-worker'
 import type { LatestTaskContext } from './scheduler'
 import type { CompiledConfig, CompiledRule } from './type'
 import { createSelect, getConfiguration, setConfiguration } from '@vscode-use/utils'
@@ -16,6 +17,7 @@ const MAX_MATCHES_PER_RULE = 1_000
 const MAX_TOTAL_RANGES = 10_000
 const MAX_TOTAL_SCAN_TIME = 1_000
 const MAX_SESSION_SCAN_TIME = 5_000
+const REGEX_EXECUTION_TIMEOUT = 500
 const MAX_JOBS_PER_CHUNK = 25
 const MAX_SESSION_JOBS = 1_000
 const MAX_TIMEOUTS_PER_CHUNK = 3
@@ -208,7 +210,7 @@ export async function scanRule(
   acceptedMatchOffset: number,
   maxSpans: number,
   refreshSpanBudget: boolean,
-  executionTimeoutMs?: number,
+  executionOptions?: RegexExecutionOptions,
 ): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }>, truncated: boolean }> {
   let executionMs = 0
   const matches = await executor.execute({
@@ -225,7 +227,7 @@ export async function scanRule(
     targetGroups: rule.targets.map(target => target.groupIndex),
     text: slice.text,
     textKey: slice.textKey,
-  }, signal, durationMs => executionMs = durationMs, executionTimeoutMs)
+  }, signal, durationMs => executionMs = durationMs, executionOptions)
 
   let acceptedMatchCount = 0
   const ranges = matches.flatMap((match) => {
@@ -505,6 +507,15 @@ export function activate(context: ExtensionContext): void {
         clearEditor()
       return
     }
+    try {
+      manager.reserveProfile(editor, profileId, priorityStyleIds)
+    }
+    catch (error) {
+      ruleSnapshots.delete(editor)
+      scanSessions.delete(editor)
+      warnOnce(`Failed to reserve decoration profile: ${error instanceof Error ? error.message : String(error)}`, true)
+      return
+    }
 
     const scanPlan = getScanSlices(editor)
     const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
@@ -635,8 +646,10 @@ export function activate(context: ExtensionContext): void {
         }
         const remainingChunkMs = MAX_TOTAL_SCAN_TIME - chunkExecutionMs
         const remainingSessionMs = MAX_SESSION_SCAN_TIME - session.elapsedScanTime
-        const executionTimeoutMs = Math.max(1, Math.min(500, remainingChunkMs, remainingSessionMs))
-        const budgetEndsSession = remainingSessionMs <= remainingChunkMs && remainingSessionMs < 500
+        const remainingBudgetMs = Math.min(remainingChunkMs, remainingSessionMs)
+        const executionTimeoutMs = Math.max(1, Math.min(REGEX_EXECUTION_TIMEOUT, remainingBudgetMs))
+        const deadlineKind = remainingBudgetMs <= REGEX_EXECUTION_TIMEOUT ? 'scan-budget' : 'regex-timeout'
+        const budgetEndsSession = remainingSessionMs <= remainingChunkMs && remainingSessionMs <= REGEX_EXECUTION_TIMEOUT
         try {
           const scanResult = await scanRule(
             executor,
@@ -647,7 +660,7 @@ export function activate(context: ExtensionContext): void {
             session.currentRuleMatchCount,
             MAX_TOTAL_RANGES,
             false,
-            executionTimeoutMs,
+            { deadlineKind, timeoutMs: executionTimeoutMs },
           )
           if (!isCurrent())
             return
@@ -909,7 +922,7 @@ export function activate(context: ExtensionContext): void {
         retryTimers.delete(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
-        manager.releaseEditor(editor)
+        manager.forgetEditor(editor)
       }
     }),
     workspace.onDidOpenTextDocument((document) => {

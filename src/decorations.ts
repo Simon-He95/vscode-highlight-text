@@ -62,17 +62,17 @@ export class DecorationManager {
     const previousProfileId = this.editorProfiles.get(editor)
     const previousProfile = previousProfileId ? this.profiles.get(previousProfileId) : undefined
     if (previousProfileId !== profileId && previousProfile?.editors.size === 1)
-      this.detachEditor(editor, previousProfileId!)
+      this.detachEditor(editor, true, previousProfileId!)
     try {
       this.prepareProfile(profileId, priorityStyleIds)
     }
     catch (error) {
       if (previousProfileId)
-        this.detachEditor(editor, previousProfileId)
+        this.detachEditor(editor, true, previousProfileId)
       throw error
     }
     if (previousProfileId && previousProfileId !== profileId)
-      this.detachEditor(editor, previousProfileId)
+      this.detachEditor(editor, true, previousProfileId)
     const profile = this.profiles.get(profileId)!
     profile.editors.add(editor)
     this.editorProfiles.set(editor, profileId)
@@ -119,33 +119,35 @@ export class DecorationManager {
   }
 
   releaseEditor(editor: TextEditor): void {
-    if (this.disposed)
-      return
-    const profileId = this.editorProfiles.get(editor)
-    if (profileId)
-      this.detachEditor(editor, profileId)
+    this.detachEditor(editor, true)
+  }
+
+  forgetEditor(editor: TextEditor): void {
+    this.detachEditor(editor, false)
   }
 
   dispose(): void {
     if (this.disposed)
       return
     this.disposed = true
-    for (const profile of this.profiles.values()) {
-      for (const editor of profile.editors) {
-        for (const styleId of this.activeStyles.get(editor) ?? [])
-          this.clearStyle(editor, profile, styleId)
-      }
+    for (const profile of this.profiles.values())
       this.disposeProfile(profile)
-    }
     this.profiles.clear()
   }
 
-  private detachEditor(editor: TextEditor, profileId: string): void {
+  private detachEditor(editor: TextEditor, clearRanges: boolean, expectedProfileId?: string): void {
+    if (this.disposed)
+      return
+    const profileId = expectedProfileId ?? this.editorProfiles.get(editor)
+    if (!profileId)
+      return
     const profile = this.profiles.get(profileId)
     if (!profile)
       return
-    for (const styleId of this.activeStyles.get(editor) ?? [])
-      this.clearStyle(editor, profile, styleId)
+    if (clearRanges) {
+      for (const styleId of this.activeStyles.get(editor) ?? [])
+        this.clearStyle(editor, profile, styleId)
+    }
     this.activeStyles.delete(editor)
     this.editorProfiles.delete(editor)
     profile.editors.delete(editor)

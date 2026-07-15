@@ -356,6 +356,27 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
+  it('does not scan after a decoration profile is quarantined', async () => {
+    configuration.rules = {
+      plaintext: { light: { blue: ['bar'], red: ['foo'] } },
+    }
+    const editor = createEditor('foo', 'quarantined-profile')
+    window.visibleTextEditors = [editor] as any
+    const partialType = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => partialType as any)
+      .mockImplementationOnce(() => { throw new Error('invalid decoration') })
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('invalid decoration')))
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    expect(editor.document.getText).not.toHaveBeenCalled()
+    expect(partialType.dispose).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+  })
+
   it('keeps a preflight profile while an oversized scan clears ranges', async () => {
     const editor = createEditor(`foo${'x'.repeat(200_001)}`, 'initial-scan-budget')
     window.visibleTextEditors = [editor] as any
@@ -697,7 +718,7 @@ describe('extension activation orchestration', () => {
     editor.document.isClosed = true
     window.visibleTextEditors = []
     await __events.closeDocument.fire(editor.document)
-    expect(editor.setDecorations).toHaveBeenCalledWith(expect.anything(), [])
+    expect(editor.setDecorations).not.toHaveBeenCalled()
 
     editor.setDecorations.mockClear()
     editor.document.languageId = 'markdown'

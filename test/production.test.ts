@@ -1058,7 +1058,7 @@ describe('regex execution', () => {
       textKey: 'unified-cache-budget',
     }
     await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 6]] }])
-    await expect(executor.execute(request, undefined, undefined, 50)).rejects.toThrow('remaining 50ms scan budget')
+    await expect(executor.execute(request, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 50 })).rejects.toThrow('remaining 50ms scan budget')
     executor.dispose()
   })
 
@@ -1089,7 +1089,7 @@ describe('regex execution', () => {
       })).resolves.toEqual([{ spans: [[0, 6]] }])
     }
 
-    await expect(executor.execute(retainedRequest, undefined, undefined, 50)).rejects.toThrow('remaining 50ms scan budget')
+    await expect(executor.execute(retainedRequest, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 50 })).rejects.toThrow('remaining 50ms scan budget')
     executor.dispose()
   })
 
@@ -1117,7 +1117,7 @@ describe('regex execution', () => {
       })).resolves.toEqual([{ spans: [[0, 6]] }])
     }
 
-    await expect(executor.execute(retainedRequest, undefined, undefined, 10)).resolves.toEqual([{ spans: [[0, 6]] }])
+    await expect(executor.execute(retainedRequest, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 10 })).resolves.toEqual([{ spans: [[0, 6]] }])
     executor.dispose()
   })
 
@@ -1260,15 +1260,15 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
-  it('uses a per-request timeout as a scan budget without recording a regex timeout', async () => {
+  it('uses an explicit deadline kind when the scan budget equals the regex timeout', async () => {
     const worker = new EventEmitter() as any
     worker.off = worker.removeListener.bind(worker)
     worker.unref = vi.fn()
     worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, started: true })))
     worker.terminate = vi.fn(async () => 0)
-    const executor = new RegexExecutor(500, () => worker)
+    const executor = new RegexExecutor(10, () => worker)
     const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
-    await expect(executor.execute(request, undefined, undefined, 10)).rejects.toSatisfy(isRegexExecutionBudgetError)
+    await expect(executor.execute(request, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 10 })).rejects.toSatisfy(isRegexExecutionBudgetError)
     expect(worker.terminate).toHaveBeenCalledTimes(1)
     executor.dispose()
   })
@@ -1601,6 +1601,33 @@ describe('decoration lifecycle', () => {
     manager.releaseEditor(editor)
     expect(type.dispose).toHaveBeenCalledTimes(1)
     manager.dispose()
+  })
+
+  it('forgets a destroyed editor without calling its decoration API', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'destroyed', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    editor.setDecorations.mockClear()
+
+    manager.forgetEditor(editor)
+
+    expect(editor.setDecorations).not.toHaveBeenCalled()
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('disposes types without calling editor APIs during manager shutdown', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'shutdown', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    editor.setDecorations.mockClear()
+
+    manager.dispose()
+
+    expect(editor.setDecorations).not.toHaveBeenCalled()
+    expect(type.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('keeps profile disposal idempotent during reentrant manager cleanup', () => {
