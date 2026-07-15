@@ -184,7 +184,7 @@ parentPort.on('message', ({ id, request, reset }) => {
       const ignored = []
       for (const pattern of request.ignores) {
         const regex = new RegExp(pattern.source, pattern.flags)
-        const collected = collect(regex, text, maxIgnoreMatches, (match) => {
+        const collected = collect(regex, text, maxIgnoreMatches + 1, (match) => {
           const span = match.indices && match.indices[0]
           if (
             span
@@ -199,7 +199,7 @@ parentPort.on('message', ({ id, request, reset }) => {
             ignored.push(span)
           }
         }, 0, maxIgnoreMatches + 1)
-        if (collected.truncated || collected.rawTruncated)
+        if (collected.count > maxIgnoreMatches || collected.rawTruncated)
           {
           const error = new Error('Ignore pattern exceeded ' + maxIgnoreMatches + ' matches')
           error.code = 'IGNORE_LIMIT'

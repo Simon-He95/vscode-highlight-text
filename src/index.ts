@@ -79,8 +79,13 @@ export function resetCurrentRuleState(session: Pick<ScanSession, 'candidateKeys'
   session.nextSliceIndex = 0
 }
 
-interface ScanPlan {
+interface VisibleScanPlan {
   complete: boolean
+  ranges: Array<{ end: number, start: number }>
+  scanKey: string
+}
+
+interface ScanPlan {
   scanKey: string
   slices: ScanSlice[]
 }
@@ -129,26 +134,29 @@ export function nextCodePointOffset(document: TextDocument, offset: number, docu
   return offset + (first >= 0xD800 && first <= 0xDBFF && second >= 0xDC00 && second <= 0xDFFF ? 2 : 1)
 }
 
-function getScanSlices(editor: TextEditor): ScanPlan {
+function getVisibleScanPlan(editor: TextEditor): VisibleScanPlan {
   const document = editor.document
-  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
   const visible = editor.visibleRanges
     .map(range => ({ start: document.offsetAt(range.start), end: document.offsetAt(range.end) }))
     .sort((a, b) => a.start - b.start)
-  const mergedVisible: Array<{ end: number, start: number }> = []
+  const ranges: Array<{ end: number, start: number }> = []
   for (const range of visible) {
-    const previous = mergedVisible.at(-1)
+    const previous = ranges.at(-1)
     if (previous && range.start <= previous.end)
       previous.end = Math.max(previous.end, range.end)
     else
-      mergedVisible.push({ ...range })
+      ranges.push({ ...range })
   }
-  const scanKey = mergedVisible.map(range => `${range.start}:${range.end}`).join(',')
-  const visibleSize = mergedVisible.reduce((total, range) => total + range.end - range.start, 0)
-  if (visibleSize > MAX_SCAN_SIZE)
-    return { complete: false, scanKey, slices: [] }
+  const scanKey = ranges.map(range => `${range.start}:${range.end}`).join(',')
+  const visibleSize = ranges.reduce((total, range) => total + range.end - range.start, 0)
+  return { complete: visibleSize <= MAX_SCAN_SIZE, ranges, scanKey }
+}
 
-  const contexts = mergedVisible.map((range) => {
+function getScanSlices(editor: TextEditor, visiblePlan: VisibleScanPlan): ScanPlan {
+  const document = editor.document
+  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
+  const visibleSize = visiblePlan.ranges.reduce((total, range) => total + range.end - range.start, 0)
+  const contexts = visiblePlan.ranges.map((range) => {
     const startLine = document.positionAt(range.start).line
     const endLine = document.positionAt(range.end).line
     const contextStartLine = Math.max(0, startLine - OVERSCAN_LINES)
@@ -196,9 +204,9 @@ function getScanSlices(editor: TextEditor): ScanPlan {
   const slices = planned.map(({ scanEnd, ...slice }, index) => ({
     ...slice,
     text: document.getText(new Range(document.positionAt(slice.scanStart), document.positionAt(scanEnd))),
-    textKey: JSON.stringify([getDocumentCacheIdentity(document), document.version, scanKey, index, slice.scanStart, scanEnd]),
+    textKey: JSON.stringify([getDocumentCacheIdentity(document), document.version, visiblePlan.scanKey, index, slice.scanStart, scanEnd]),
   }))
-  return { complete: true, scanKey, slices }
+  return { scanKey: visiblePlan.scanKey, slices }
 }
 
 export async function scanRule(
@@ -372,6 +380,7 @@ function buildRuleSelection(config: CompiledConfig, languageId: string, dark: bo
 
 const ruleSelectionCache = new WeakMap<CompiledConfig, Map<string, ReturnType<typeof buildRuleSelection>>>()
 const ruleFingerprintCache = new WeakMap<CompiledRule, string>()
+const vueTsxDetectionCache = new WeakMap<CompiledConfig, Map<boolean, boolean>>()
 
 function getRuleFingerprint(rule: CompiledRule): string {
   const cached = ruleFingerprintCache.get(rule)
@@ -394,11 +403,23 @@ function haveEquivalentRules(left: CompiledRule[], right: CompiledRule[]): boole
     && leftFingerprints.every((fingerprint, index) => fingerprint === rightFingerprints[index])
 }
 
+export function needsVueTsxDetection(config: CompiledConfig, dark: boolean): boolean {
+  const cache = vueTsxDetectionCache.get(config) ?? new Map<boolean, boolean>()
+  vueTsxDetectionCache.set(config, cache)
+  const cached = cache.get(dark)
+  if (cached !== undefined)
+    return cached
+  const needed = !haveEquivalentRules(
+    getRulesForLanguage(config, 'vue', dark),
+    getRulesForLanguage(config, 'vuetsx', dark),
+  )
+  cache.set(dark, needed)
+  return needed
+}
+
 function getRuleSelection(config: CompiledConfig, document: TextDocument) {
   const dark = isDarkTheme()
-  const vueRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vue', dark) : []
-  const vueTsxRules = document.languageId === 'vue' ? getRulesForLanguage(config, 'vuetsx', dark) : []
-  const languageId = document.languageId === 'vue' && !haveEquivalentRules(vueRules, vueTsxRules)
+  const languageId = document.languageId === 'vue' && needsVueTsxDetection(config, dark)
     ? getRuleLanguageId(document)
     : document.languageId
   const key = `${languageId}:${dark ? 'dark' : 'light'}`
@@ -422,8 +443,13 @@ export function activate(context: ExtensionContext): void {
   let initialManagerError: unknown
   let manager = new DecorationManager(compiled.styles)
   for (const editor of window.visibleTextEditors) {
-    if (!shouldProcess(getDocumentPath(editor.document)) || !editor.visibleRanges.length)
+    if (
+      !shouldProcess(getDocumentPath(editor.document))
+      || !editor.visibleRanges.length
+      || !getVisibleScanPlan(editor).complete
+    ) {
       continue
+    }
     const selection = getRuleSelection(compiled, editor.document)
     try {
       manager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
@@ -500,6 +526,14 @@ export function activate(context: ExtensionContext): void {
         clearEditor()
       return
     }
+    const visiblePlan = getVisibleScanPlan(editor)
+    if (!visiblePlan.complete) {
+      ruleSnapshots.delete(editor)
+      scanSessions.delete(editor)
+      manager.releaseEditor(editor)
+      warnOnce(`Visible scan exceeds ${MAX_SCAN_SIZE} characters in ${document.uri.fsPath}; stale highlights were cleared`)
+      return
+    }
     const { priorityStyleIds, profileId, rules, warnings } = getRuleSelection(compiled, document)
     warnings.forEach(warning => warnOnce(warning))
     if (!rules.length) {
@@ -517,7 +551,7 @@ export function activate(context: ExtensionContext): void {
       return
     }
 
-    const scanPlan = getScanSlices(editor)
+    const scanPlan = getScanSlices(editor, visiblePlan)
     const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
     const canPreservePrevious = previousSnapshots.size > 0 && [...previousSnapshots.values()].every(
       snapshot => snapshot.documentVersion === documentVersion && snapshot.scanKey === scanPlan.scanKey,
@@ -528,12 +562,6 @@ export function activate(context: ExtensionContext): void {
       ruleSnapshots.delete(editor)
       manager.clearRanges(editor)
     }
-    if (!scanPlan.complete) {
-      clearStaleSnapshot()
-      warnOnce(`Visible scan exceeds ${MAX_SCAN_SIZE} characters in ${document.uri.fsPath}; stale highlights were cleared`)
-      return
-    }
-
     const sessionKey = JSON.stringify([documentVersion, scanPlan.scanKey, profileId])
     let structuralFailure = structuralFailures.get(editor)
     if (!structuralFailure || structuralFailure.key !== sessionKey) {
@@ -867,6 +895,10 @@ export function activate(context: ExtensionContext): void {
         manager.releaseEditor(editor)
         continue
       }
+      if (!getVisibleScanPlan(editor).complete) {
+        manager.releaseEditor(editor)
+        continue
+      }
       const selection = getRuleSelection(compiled, editor.document)
       if (!selection.rules.length) {
         manager.releaseEditor(editor)
@@ -959,8 +991,13 @@ export function activate(context: ExtensionContext): void {
       try {
         nextManager = new DecorationManager(nextCompiled.styles)
         for (const editor of window.visibleTextEditors) {
-          if (!nextFilter(getDocumentPath(editor.document)) || !editor.visibleRanges.length)
+          if (
+            !nextFilter(getDocumentPath(editor.document))
+            || !editor.visibleRanges.length
+            || !getVisibleScanPlan(editor).complete
+          ) {
             continue
+          }
           const selection = getRuleSelection(nextCompiled, editor.document)
           nextManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
         }

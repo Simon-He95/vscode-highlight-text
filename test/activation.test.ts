@@ -377,17 +377,47 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('keeps a preflight profile while an oversized scan clears ranges', async () => {
-    const editor = createEditor(`foo${'x'.repeat(200_001)}`, 'initial-scan-budget')
+  it('releases decoration types when an editor becomes too large to scan', async () => {
+    const editor = createEditor('foo', 'scan-budget-release')
     window.visibleTextEditors = [editor] as any
     const context = { subscriptions: [] } as unknown as ExtensionContext
 
     activate(context)
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
     const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+
+    editor.setText(`foo${'x'.repeat(200_001)}`)
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Visible scan exceeds 200000 characters')))
-    expect(type.dispose).not.toHaveBeenCalled()
-    disposeContext(context)
     expect(type.dispose).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+  })
+
+  it('does not let oversized profiles exhaust types needed by a scannable editor', async () => {
+    const rules: Record<string, object> = {}
+    const light = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [
+      `rgb(${index % 256},${Math.floor(index / 256)},0)`,
+      [`pattern-${index}`],
+    ]))
+    const oversized = Array.from({ length: 5 }, (_, languageIndex) => {
+      const languageId = `oversized-${languageIndex}`
+      rules[languageId] = { light }
+      const editor = createEditor('x'.repeat(200_001), languageId)
+      editor.document.languageId = languageId
+      return editor
+    })
+    rules.plaintext = { light: { blue: ['TARGET'] } }
+    configuration.rules = rules
+    const scannable = createEditor('TARGET', 'scannable-after-oversized')
+    window.visibleTextEditors = [...oversized, scannable] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    await waitFor(() => expect(scannable.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true), 3_000)
+
+    expect(window.showWarningMessage).not.toHaveBeenCalledWith(expect.stringContaining('Decoration type budget exceeded'))
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    disposeContext(context)
   })
 
   it('shares target layers across patterns from one style entry', async () => {

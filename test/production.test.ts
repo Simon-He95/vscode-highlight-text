@@ -6,7 +6,7 @@ import { window } from 'vscode'
 import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
-import { getDocumentCacheIdentity, nextCodePointOffset, previousCodePointOffset, resetCurrentRuleState, scanRule } from '../src/index'
+import { getDocumentCacheIdentity, needsVueTsxDetection, nextCodePointOffset, previousCodePointOffset, resetCurrentRuleState, scanRule } from '../src/index'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, isRegexExecutionBudgetError, RegexExecutor } from '../src/regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
@@ -407,6 +407,24 @@ describe('regex configuration', () => {
     expect(rules[0].ignores).toHaveLength(1)
     expect(rules[1].ignores).toHaveLength(0)
   })
+
+  it('caches Vue and Vue TSX rule equivalence by config and theme', () => {
+    const compiled = compileConfig({
+      vue: { light: { red: ['foo'] } },
+      vuetsx: { light: { blue: ['foo'] } },
+    })
+    const get = vi.spyOn(compiled.languages, 'get')
+
+    expect(needsVueTsxDetection(compiled, false)).toBe(true)
+    const lightReads = get.mock.calls.length
+    expect(needsVueTsxDetection(compiled, false)).toBe(true)
+    expect(get).toHaveBeenCalledTimes(lightReads)
+
+    expect(needsVueTsxDetection(compiled, true)).toBe(false)
+    const darkReads = get.mock.calls.length
+    expect(needsVueTsxDetection(compiled, true)).toBe(false)
+    expect(get).toHaveBeenCalledTimes(darkReads)
+  })
 })
 
 describe('scan session state', () => {
@@ -791,15 +809,23 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
-  it('rejects a rule conservatively when its ignore scan reaches the limit', async () => {
+  it.each([
+    [999, false],
+    [1_000, false],
+    [1_001, true],
+  ])('rejects ignore patterns only after exceeding the match limit (%i matches)', async (matchCount, exceedsLimit) => {
     const executor = new RegexExecutor(500)
-    await expect(executor.execute({
+    const result = executor.execute({
       ignores: [{ source: 'x', flags: 'gd' }],
       maxMatches: 10,
       pattern: { source: 'TARGET', flags: 'gd' },
       targetGroups: [0],
-      text: `${'x'.repeat(1_000)}TARGET`,
-    })).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+      text: `${'x'.repeat(matchCount)}TARGET`,
+    })
+    if (exceedsLimit)
+      await expect(result).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+    else
+      await expect(result).resolves.toEqual([{ spans: [[matchCount, matchCount + 6]] }])
     executor.dispose()
   })
 
