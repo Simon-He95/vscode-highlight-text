@@ -497,10 +497,10 @@ export function activate(context: ExtensionContext): void {
   if (initialManagerError)
     warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`, true)
 
-  const retryTimers = new Map<TextEditor, ReturnType<typeof setTimeout>>()
+  const retryTimers = new Map<TextEditor, { dueAt: number, timer: ReturnType<typeof setTimeout> }>()
   let scheduleContinuation = (_editor: TextEditor) => {}
   let restartSiblingEditors = (_editor: TextEditor, _document: TextDocument) => {}
-  let scheduleInfrastructureRetry = (_editor: TextEditor, _delay: number, _isCurrent: () => boolean) => {}
+  let scheduleRetry = (_editor: TextEditor, _delay: number) => {}
 
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
@@ -516,6 +516,10 @@ export function activate(context: ExtensionContext): void {
 
     if (!isCurrent())
       return
+    const pendingRetry = retryTimers.get(editor)
+    if (pendingRetry)
+      clearTimeout(pendingRetry.timer)
+    retryTimers.delete(editor)
     const clearEditor = () => {
       ruleSnapshots.delete(editor)
       scanSessions.delete(editor)
@@ -563,6 +567,7 @@ export function activate(context: ExtensionContext): void {
       manager.clearRanges(editor)
     }
     const sessionKey = JSON.stringify([documentVersion, scanPlan.scanKey, profileId])
+    const failureInputKey = JSON.stringify([documentVersion, scanPlan.scanKey])
     let structuralFailure = structuralFailures.get(editor)
     if (!structuralFailure || structuralFailure.key !== sessionKey) {
       structuralFailure = { key: sessionKey, ruleIds: new Set() }
@@ -642,7 +647,10 @@ export function activate(context: ExtensionContext): void {
         break
       }
       const rule = rules[session.nextRuleIndex]
-      if (failures.isDisabled(document, rule.id) || structuralFailure.ruleIds.has(rule.id)) {
+      const failureStatus = failures.getStatus(document, rule.id, failureInputKey)
+      if (failureStatus.disabled || structuralFailure.ruleIds.has(rule.id)) {
+        if (failureStatus.disabled)
+          scheduleRetry(editor, failureStatus.retryAfterMs)
         session.failedRuleIds.add(rule.id)
         acceptPreviousSnapshot(rule.id)
         resetCurrentRuleState(session)
@@ -745,9 +753,10 @@ export function activate(context: ExtensionContext): void {
             chunkTimeoutCount++
             session.failedRuleIds.add(rule.id)
             acceptPreviousSnapshot(rule.id)
-            failures.recordFailure(document, rule.id)
+            const failureStatus = failures.recordFailure(document, rule.id, failureInputKey)
+            scheduleRetry(editor, failureStatus.retryAfterMs)
             restartSiblingEditors(editor, document)
-            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried on the next refresh after ${REGEX_FAILURE_COOLDOWN / 1000}s`, true)
+            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried automatically while the editor remains visible, or after the input changes`, true)
           }
           else if (isRegexExecutionLimitError(error)) {
             session.failedRuleIds.add(rule.id)
@@ -813,7 +822,7 @@ export function activate(context: ExtensionContext): void {
       clearStaleSnapshot()
       session.infrastructureRetryCount++
       if (session.infrastructureRetryCount <= 3)
-        scheduleInfrastructureRetry(editor, infrastructureRetryAfterMs, isCurrent)
+        scheduleRetry(editor, infrastructureRetryAfterMs)
       else
         scanSessions.delete(editor)
       return
@@ -876,16 +885,27 @@ export function activate(context: ExtensionContext): void {
         scheduler.schedule(sibling, true)
     }
   }
-  scheduleInfrastructureRetry = (editor, delay, isCurrent) => {
+  scheduleRetry = (editor, delay) => {
+    const retryDelay = Math.max(0, delay)
+    const dueAt = Date.now() + retryDelay
     const previous = retryTimers.get(editor)
+    if (previous && previous.dueAt <= dueAt)
+      return
     if (previous)
-      clearTimeout(previous)
+      clearTimeout(previous.timer)
+    const document = editor.document
     const timer = setTimeout(() => {
       retryTimers.delete(editor)
-      if (isCurrent())
+      if (
+        !disposed
+        && !document.isClosed
+        && editor.document === document
+        && window.visibleTextEditors.includes(editor)
+      ) {
         scheduler.schedule(editor, true)
-    }, Math.max(0, delay))
-    retryTimers.set(editor, timer)
+      }
+    }, retryDelay)
+    retryTimers.set(editor, { dueAt, timer })
   }
 
   const refreshVisibleEditors = (immediate = true) => {
@@ -916,7 +936,7 @@ export function activate(context: ExtensionContext): void {
         scheduler.remove(editor)
         const retryTimer = retryTimers.get(editor)
         if (retryTimer)
-          clearTimeout(retryTimer)
+          clearTimeout(retryTimer.timer)
         retryTimers.delete(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
@@ -938,8 +958,13 @@ export function activate(context: ExtensionContext): void {
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((event) => {
       for (const editor of window.visibleTextEditors) {
-        if (editor.document === event.document && event.contentChanges.length)
-          scheduler.schedule(editor)
+        if (editor.document !== event.document || !event.contentChanges.length)
+          continue
+        const retryTimer = retryTimers.get(editor)
+        if (retryTimer)
+          clearTimeout(retryTimer.timer)
+        retryTimers.delete(editor)
+        scheduler.schedule(editor)
       }
     }),
     workspace.onDidCloseTextDocument((document) => {
@@ -950,7 +975,7 @@ export function activate(context: ExtensionContext): void {
         scheduler.remove(editor)
         const retryTimer = retryTimers.get(editor)
         if (retryTimer)
-          clearTimeout(retryTimer)
+          clearTimeout(retryTimer.timer)
         retryTimers.delete(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
@@ -1024,6 +1049,7 @@ export function activate(context: ExtensionContext): void {
       warningToastCount = 0
       compiled.warnings.forEach(warning => warnOnce(warning))
       excludeWarnings.forEach(warning => warnOnce(warning))
+      previousManager.clearEditors()
       previousManager.dispose()
       refreshVisibleEditors(true)
     }),
@@ -1039,7 +1065,7 @@ export function activate(context: ExtensionContext): void {
       dispose: () => {
         disposed = true
         scheduler.dispose()
-        retryTimers.forEach(timer => clearTimeout(timer))
+        retryTimers.forEach(({ timer }) => clearTimeout(timer))
         retryTimers.clear()
         executor.dispose()
         manager.dispose()

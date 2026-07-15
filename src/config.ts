@@ -115,6 +115,17 @@ function validateStyleComplexity(style: Record<string, unknown>): void {
   }
 }
 
+function warnUnsupportedBackground(source: Record<string, unknown>, context: string, warnings: string[]): void {
+  if (!Object.prototype.hasOwnProperty.call(source, 'background'))
+    return
+  const background = source.background
+  if (typeof background !== 'string')
+    return
+  if (/(?:gradient|url|image-set)\s*\(|(?:^|\s)(?:repeat|no-repeat|padding-box|border-box|content-box)(?:\s|$)|\/\s*(?:cover|contain)(?:\s|$)/i.test(background)) {
+    warnings.push(`\`background\` for ${context} now maps to \`backgroundColor\`; CSS gradients, images, and shorthand values are no longer supported. Use \`backgroundColor\` with a color value instead.`)
+  }
+}
+
 export function normalizeStyle(...sources: Record<string, unknown>[]): DecorationRenderOptions {
   const style = Object.create(null) as Record<string, unknown>
   let copiedProperties = 0
@@ -189,10 +200,13 @@ function compileTargets(
       config.warnings.push(`Invalid matchCss for ${context}: at least one style is required`)
       return
     }
-    return styles.map((style, index) => ({
-      groupIndex: index + 1,
-      styleId: addStyle(config, normalizeStyle(base, style)),
-    }))
+    return styles.map((style, index) => {
+      warnUnsupportedBackground(style, `${context} matchCss[${index}]`, config.warnings)
+      return {
+        groupIndex: index + 1,
+        styleId: addStyle(config, normalizeStyle(base, style)),
+      }
+    })
   }
 
   if (option && 'colors' in option) {
@@ -252,6 +266,8 @@ function compileStyleRules(
     config.warnings.push(`Invalid match patterns for ${context}`)
     return []
   }
+  if (option)
+    warnUnsupportedBackground(option, context, config.warnings)
   const commonStyle = normalizeStyle(base, option ?? {})
   const targets = compileTargets(option, base, commonStyle, context, config)
   if (!targets)

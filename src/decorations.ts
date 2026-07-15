@@ -126,6 +126,15 @@ export class DecorationManager {
     this.detachEditor(editor, false)
   }
 
+  clearEditors(): void {
+    if (this.disposed)
+      return
+    for (const [profileId, profile] of [...this.profiles]) {
+      for (const editor of [...profile.editors])
+        this.detachEditor(editor, true, profileId)
+    }
+  }
+
   dispose(): void {
     if (this.disposed)
       return

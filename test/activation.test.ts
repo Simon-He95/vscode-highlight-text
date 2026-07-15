@@ -293,7 +293,10 @@ describe('extension activation orchestration', () => {
     await waitFor(() => expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2))
     const greenType = vi.mocked(window.createTextEditorDecorationType).mock.results[1].value
     await waitFor(() => expect(editor.setDecorations.mock.calls.some(([type, ranges]) => type === greenType && ranges.length > 0)).toBe(true))
+    expect(editor.setDecorations).toHaveBeenCalledWith(redType, [])
     expect(redType.dispose).toHaveBeenCalledTimes(1)
+    const oldClearCall = editor.setDecorations.mock.calls.findIndex(([type, ranges]) => type === redType && ranges.length === 0)
+    expect(editor.setDecorations.mock.invocationCallOrder[oldClearCall]).toBeLessThan(redType.dispose.mock.invocationCallOrder[0])
 
     editor.setText('foo after reload')
     await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
@@ -328,7 +331,7 @@ describe('extension activation orchestration', () => {
     disposeContext(context)
   })
 
-  it('keeps a timed-out rule disabled across edits until its cooldown expires', async () => {
+  it('retries a timed-out rule after the document input changes', async () => {
     configuration.rules = {
       plaintext: { light: { red: ['(a+)+$'] } },
     }
@@ -339,18 +342,11 @@ describe('extension activation orchestration', () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
     activate(context)
     await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('exceeded 500ms')))
+    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 30_000)).toBe(true)
     setTimeoutSpy.mockClear()
 
-    for (let index = 0; index < 3; index++) {
-      editor.setText(`${'a'.repeat(20_000)}b${index}`)
-      await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
-    }
-    await new Promise(resolve => setTimeout(resolve, 200))
-    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 500)).toBe(false)
-
-    const currentTime = Date.now()
-    vi.spyOn(Date, 'now').mockReturnValue(currentTime + 30_001)
-    await __events.visibleRanges.fire({ textEditor: editor })
+    editor.setText('safe input')
+    await __events.textDocument.fire({ contentChanges: [{}], document: editor.document })
     await waitFor(() => expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 500)).toBe(true))
 
     disposeContext(context)

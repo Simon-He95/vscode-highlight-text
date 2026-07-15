@@ -9,6 +9,8 @@
 
 ## Configuration
 > ⚠️ 请注意下面表示的是配置的类型, 如何配置可以参考 [shared rules](https://github.com/Simon-He95/vscode-highlight-text/issues/5)
+>
+> 兼容性说明：请使用 `backgroundColor` 设置高亮背景色。旧的 `background` 字段仍可作为颜色值的废弃别名使用，但不再支持 CSS 渐变、图片和 shorthand 值。
 
 ```json
 // 自定义设置高亮样式, 请注意下面表示的是配置的类型, 如何配置可以参考这个链接

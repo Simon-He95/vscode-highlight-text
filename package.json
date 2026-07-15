@@ -162,7 +162,12 @@
                           }
                         },
                         "background": {
-                          "type": "string"
+                          "type": "string",
+                          "deprecationMessage": "Deprecated alias for backgroundColor. CSS gradients, images, and shorthand values are no longer supported."
+                        },
+                        "backgroundColor": {
+                          "type": "string",
+                          "description": "Background color for the highlighted text."
                         }
                       },
                       "additionalProperties": true
@@ -269,7 +274,12 @@
                           }
                         },
                         "background": {
-                          "type": "string"
+                          "type": "string",
+                          "deprecationMessage": "Deprecated alias for backgroundColor. CSS gradients, images, and shorthand values are no longer supported."
+                        },
+                        "backgroundColor": {
+                          "type": "string",
+                          "description": "Background color for the highlighted text."
                         }
                       },
                       "additionalProperties": true

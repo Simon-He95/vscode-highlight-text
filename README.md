@@ -9,6 +9,8 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 
 ## Configuration
 > ⚠️ Please note that the following indicates the type of configuration. For more information on how to configure, please refer to [shared rules](https://github.com/Simon-He95/vscode-highlight-text/issues/5)
+>
+> Compatibility note: use `backgroundColor` for highlight colors. The legacy `background` field remains as a deprecated alias for color values, but CSS gradients, images, and shorthand values are no longer supported.
 
 ```json
 {

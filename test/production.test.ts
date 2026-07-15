@@ -395,6 +395,7 @@ describe('regex configuration', () => {
   it('normalizes styles, empty excludes, and rule-local ignores', () => {
     const source = { background: 'red', textDecoration: 'underline' }
     expect(normalizeStyle(source)).toEqual({ backgroundColor: 'red', textDecoration: 'underline' })
+    expect(normalizeStyle(source, { backgroundColor: 'blue' })).toEqual({ backgroundColor: 'blue', textDecoration: 'underline' })
     expect(source).toEqual({ background: 'red', textDecoration: 'underline' })
     expect(createExcludeFilter([])('/workspace/src/example.ts')).toBe(true)
     expect(createExcludeFilter(['**/dist/**'])('/workspace/dist/example.js')).toBe(false)
@@ -406,6 +407,26 @@ describe('regex configuration', () => {
     const rules = getRulesForLanguage(compiled, 'vue', false)
     expect(rules[0].ignores).toHaveLength(1)
     expect(rules[1].ignores).toHaveLength(0)
+  })
+
+  it('warns when deprecated background values use unsupported shorthand syntax', () => {
+    const compiled = compileConfig({
+      plaintext: { light: {
+        red: { match: ['foo'], background: 'linear-gradient(red, blue)' },
+        blue: { match: ['bar'], background: 'rgb(0 0 0 / 50%)' },
+        green: { match: ['baz'], matchCss: [{ background: 'url(image.png) center / cover' }] },
+      } },
+    })
+    expect(compiled.warnings).toHaveLength(2)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('plaintext.light.red'))
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('matchCss[0]'))
+
+    const rulesSchema = packageJson.contributes.configuration.properties['vscode-highlight-text.rules'] as any
+    for (const theme of ['light', 'dark']) {
+      const properties = rulesSchema.additionalProperties.properties[theme].additionalProperties.anyOf[1].properties
+      expect(properties.backgroundColor).toMatchObject({ type: 'string' })
+      expect(properties.background.deprecationMessage).toContain('Deprecated alias for backgroundColor')
+    }
   })
 
   it('caches Vue and Vue TSX rule equivalence by config and theme', () => {
@@ -1440,18 +1461,29 @@ describe('runtime controls', () => {
     expect(values.add('first')).toBe(true)
   })
 
-  it('isolates rule cooldowns by document and restores them after expiry', () => {
+  it('isolates input cooldowns and bounds retries with a rolling circuit breaker', () => {
     let now = 0
-    const registry = new RuleFailureRegistry<object>(1_000, () => now)
+    const registry = new RuleFailureRegistry<object>(1_000, () => now, 3, 1_000)
     const documentA = {}
     const documentB = {}
-    registry.recordFailure(documentA, 'rule')
-    expect(registry.isDisabled(documentA, 'rule')).toBe(true)
-    expect(registry.isDisabled(documentB, 'rule')).toBe(false)
+
+    expect(registry.recordFailure(documentA, 'rule', 'input-1')).toEqual({ disabled: true, retryAfterMs: 1_000 })
+    expect(registry.getStatus(documentA, 'rule', 'input-1')).toEqual({ disabled: true, retryAfterMs: 1_000 })
+    expect(registry.getStatus(documentA, 'rule', 'input-2')).toEqual({ disabled: false, retryAfterMs: 0 })
+    expect(registry.getStatus(documentB, 'rule', 'input-1')).toEqual({ disabled: false, retryAfterMs: 0 })
+
+    now = 100
+    registry.recordFailure(documentA, 'rule', 'input-2')
+    now = 200
+    registry.recordFailure(documentA, 'rule', 'input-3')
+    expect(registry.getStatus(documentA, 'rule', 'input-4')).toEqual({ disabled: true, retryAfterMs: 800 })
+    expect(registry.getStatus(documentA, 'other-rule', 'input-4')).toEqual({ disabled: false, retryAfterMs: 0 })
+
     now = 1_001
-    expect(registry.isDisabled(documentA, 'rule')).toBe(false)
-    registry.recordFailure(documentA, 'rule')
-    expect(registry.isDisabled(documentA, 'rule')).toBe(true)
+    expect(registry.getStatus(documentA, 'rule', 'input-4')).toEqual({ disabled: false, retryAfterMs: 0 })
+    expect(registry.getStatus(documentA, 'rule', 'input-3')).toEqual({ disabled: true, retryAfterMs: 199 })
+    now = 1_201
+    expect(registry.getStatus(documentA, 'rule', 'input-3')).toEqual({ disabled: false, retryAfterMs: 0 })
   })
 
   it('enforces strict range and duration budgets', () => {
@@ -1641,6 +1673,29 @@ describe('decoration lifecycle', () => {
     expect(editor.setDecorations).not.toHaveBeenCalled()
     expect(type.dispose).toHaveBeenCalledTimes(1)
     manager.dispose()
+  })
+
+  it('clears every attached editor before disposing a reloaded profile', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const first = new MockEditor() as any
+    const second = new MockEditor() as any
+    manager.apply(first, new Map([['a', [range(0, 1)]]]), 'reload', ['a'])
+    manager.apply(second, new Map([['a', [range(1, 2)]]]), 'reload', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    first.setDecorations.mockClear()
+    second.setDecorations.mockClear()
+
+    manager.clearEditors()
+    manager.dispose()
+
+    expect(first.setDecorations).toHaveBeenCalledWith(type, [])
+    expect(second.setDecorations).toHaveBeenCalledWith(type, [])
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    const lastClearOrder = Math.max(
+      first.setDecorations.mock.invocationCallOrder.at(-1)!,
+      second.setDecorations.mock.invocationCallOrder.at(-1)!,
+    )
+    expect(lastClearOrder).toBeLessThan(type.dispose.mock.invocationCallOrder[0])
   })
 
   it('disposes types without calling editor APIs during manager shutdown', () => {

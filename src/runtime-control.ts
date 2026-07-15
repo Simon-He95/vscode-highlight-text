@@ -29,8 +29,14 @@ export function aggregateSnapshots<Value>(
 }
 
 export interface RuleFailureState {
-  disabledUntil: number
-  failures: number
+  failedInputKey: string
+  inputDisabledUntil: number
+  recentTimeouts: number[]
+}
+
+export interface RuleFailureStatus {
+  disabled: boolean
+  retryAfterMs: number
 }
 
 export class BoundedSet<Value> {
@@ -68,31 +74,50 @@ export class RuleFailureRegistry<DocumentKey extends object> {
   constructor(
     readonly cooldownMs: number,
     private readonly now: () => number = () => Date.now(),
-  ) {}
+    readonly maxTimeoutsPerWindow = 3,
+    readonly timeoutWindowMs = cooldownMs,
+  ) {
+    if (maxTimeoutsPerWindow < 1)
+      throw new Error('Rule failure timeout limit must be positive')
+  }
 
-  isDisabled(document: DocumentKey, ruleId: string): boolean {
+  getStatus(document: DocumentKey, ruleId: string, inputKey: string): RuleFailureStatus {
     const rules = this.entries.get(document)
     const state = rules?.get(ruleId)
     if (!state)
-      return false
-    if (state.disabledUntil > this.now())
-      return true
-    rules!.delete(ruleId)
-    if (!rules!.size)
-      this.entries.delete(document)
-    return false
+      return { disabled: false, retryAfterMs: 0 }
+    const now = this.now()
+    state.recentTimeouts = state.recentTimeouts.filter(timestamp => timestamp + this.timeoutWindowMs > now)
+    const sameInputRetryAfter = state.failedInputKey === inputKey
+      ? Math.max(0, state.inputDisabledUntil - now)
+      : 0
+    const circuitRetryAfter = state.recentTimeouts.length >= this.maxTimeoutsPerWindow
+      ? Math.max(0, state.recentTimeouts[0] + this.timeoutWindowMs - now)
+      : 0
+    const retryAfterMs = Math.max(sameInputRetryAfter, circuitRetryAfter)
+    if (!retryAfterMs && !state.recentTimeouts.length) {
+      rules!.delete(ruleId)
+      if (!rules!.size)
+        this.entries.delete(document)
+    }
+    return { disabled: retryAfterMs > 0, retryAfterMs }
   }
 
-  recordFailure(document: DocumentKey, ruleId: string): RuleFailureState {
+  recordFailure(document: DocumentKey, ruleId: string, inputKey: string): RuleFailureStatus {
+    const now = this.now()
     const rules = this.entries.get(document) ?? new Map<string, RuleFailureState>()
     const previous = rules.get(ruleId)
+    const recentTimeouts = (previous?.recentTimeouts ?? [])
+      .filter(timestamp => timestamp + this.timeoutWindowMs > now)
+    recentTimeouts.push(now)
     const state = {
-      disabledUntil: this.now() + this.cooldownMs,
-      failures: (previous?.failures ?? 0) + 1,
+      failedInputKey: inputKey,
+      inputDisabledUntil: now + this.cooldownMs,
+      recentTimeouts,
     }
     rules.set(ruleId, state)
     this.entries.set(document, rules)
-    return state
+    return this.getStatus(document, ruleId, inputKey)
   }
 
   clearDocument(document: DocumentKey): void {
