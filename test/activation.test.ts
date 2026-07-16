@@ -106,6 +106,12 @@ describe('vue TSX language detection', () => {
     expect(containsVueTsxBlock('<script data-lang="tsx"></script>')).toBe(false)
     expect(containsVueTsxBlock('<!-- <script lang="tsx"></script> -->')).toBe(false)
     expect(containsVueTsxBlock('<!-- ignored --><script lang="tsx"></script>')).toBe(true)
+    expect(containsVueTsxBlock('<script setup lang="ts">const example = \'<script lang="tsx"></script>\'</script>')).toBe(false)
+    expect(containsVueTsxBlock('<script setup lang="ts">// <template lang="tsx"></script>')).toBe(false)
+    expect(containsVueTsxBlock('<script setup lang="ts">const example = \'<script lang="tsx"></script>\'</script><template lang="tsx"></template>')).toBe(true)
+    expect(containsVueTsxBlock('<template><template></template><script lang="tsx"></script></template>')).toBe(false)
+    expect(containsVueTsxBlock('<template><template></template></template><script lang="tsx"></script>')).toBe(true)
+    expect(containsVueTsxBlock('<script setup lang="ts">const example = \'<script lang="tsx"></script>\'')).toBe(false)
   })
 })
 
@@ -488,11 +494,46 @@ describe('extension activation orchestration', () => {
       ))).toBe(true)
     })
     expect(window.showWarningMessage).not.toHaveBeenCalledWith(expect.stringContaining('scan session limit reached'))
+    const fullSliceReads = editor.document.getText.mock.calls.filter(([range]) => (
+      range?.start.character === 0 && range.end.character === 'TARGET'.length
+    ))
+    expect(fullSliceReads).toHaveLength(1)
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
     const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
     expect(type.dispose).not.toHaveBeenCalled()
     disposeContext(context)
     expect(type.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves timeout retries across internal continuations', async () => {
+    const patterns = ['(a+)+$']
+    patterns.push(...Array.from({ length: 30 }, (_, index) => `missing-${index}`), 'TARGET')
+    configuration.rules = { plaintext: { light: { red: patterns } } }
+    const editor = createEditor(`${'a'.repeat(20_000)}b TARGET`, 'timeout-continuation')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+
+    activate(context)
+    await waitFor(() => expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('exceeded 500ms')))
+    await waitFor(() => expect(editor.setDecorations.mock.calls.some(([, ranges]) => ranges.length > 0)).toBe(true))
+
+    const retryCallIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 30_000)
+    expect(retryCallIndex).toBeGreaterThanOrEqual(0)
+    const retryCallback = setTimeoutSpy.mock.calls[retryCallIndex][0] as () => void
+    const retryHandle = setTimeoutSpy.mock.results[retryCallIndex].value
+    expect(clearTimeoutSpy).not.toHaveBeenCalledWith(retryHandle)
+
+    clearTimeout(retryHandle)
+    const now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now + 30_001)
+    retryCallback()
+    await waitFor(() => {
+      expect(setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 30_000)).toHaveLength(2)
+    }, 2_000)
+
+    disposeContext(context)
   })
 
   it('warns when completed rules exhaust the total range budget', async () => {

@@ -70,6 +70,7 @@ interface ScanSession {
   nextSliceIndex: number
   previousSnapshots: Map<string, RuleSnapshot>
   scannedSnapshots: Map<string, Map<string, VscodeRange[]>>
+  scanPlan: ScanPlan
 }
 
 export function resetCurrentRuleState(session: Pick<ScanSession, 'candidateKeys' | 'candidateSnapshot' | 'currentRuleMatchCount' | 'nextSliceIndex'>): void {
@@ -269,6 +270,70 @@ function isAsciiTagNameCharacter(character: string): boolean {
     || (character >= 'a' && character <= 'z')
 }
 
+function findVueBlockEnd(lower: string, contentStart: number, blockName: 'script' | 'template'): number {
+  let cursor = contentStart
+  let depth = 1
+  while (cursor < lower.length) {
+    const start = lower.indexOf('<', cursor)
+    if (start < 0)
+      return -1
+    if (lower.startsWith('<!--', start)) {
+      const commentEnd = lower.indexOf('-->', start + 4)
+      if (commentEnd < 0)
+        return -1
+      cursor = commentEnd + 3
+      continue
+    }
+    const closing = lower.startsWith(`</${blockName}`, start)
+    const opening = blockName === 'template' && lower.startsWith('<template', start)
+    if (!closing && !opening) {
+      cursor = start + 1
+      continue
+    }
+    const nameEnd = start + blockName.length + (closing ? 2 : 1)
+    const boundary = lower[nameEnd]
+    if (boundary && isAsciiTagNameCharacter(boundary)) {
+      cursor = nameEnd
+      continue
+    }
+    const limit = Math.min(lower.length, start + 4_097)
+    let end = -1
+    let quote = ''
+    for (let index = nameEnd; index < limit; index++) {
+      const character = lower[index]
+      if (quote) {
+        if (character === quote)
+          quote = ''
+        continue
+      }
+      if (character === '"' || character === '\'') {
+        quote = character
+        continue
+      }
+      if (character === '>') {
+        end = index
+        break
+      }
+      if (character === '<')
+        break
+    }
+    if (end < 0) {
+      cursor = limit
+      continue
+    }
+    if (closing) {
+      depth--
+      if (!depth)
+        return end + 1
+    }
+    else if (!lower.slice(nameEnd, end).trimEnd().endsWith('/')) {
+      depth++
+    }
+    cursor = end + 1
+  }
+  return -1
+}
+
 export function containsVueTsxBlock(text: string): boolean {
   const lower = text.toLowerCase()
   let cursor = 0
@@ -326,7 +391,14 @@ export function containsVueTsxBlock(text: string): boolean {
     const tag = lower.slice(nameEnd, end)
     if (/(?:^|\s)lang\s*=\s*["']tsx["']/.test(tag))
       return true
-    cursor = end + 1
+    if (tag.trimEnd().endsWith('/')) {
+      cursor = end + 1
+      continue
+    }
+    const blockEnd = findVueBlockEnd(lower, end + 1, isScript ? 'script' : 'template')
+    if (blockEnd < 0)
+      return false
+    cursor = blockEnd
   }
   return false
 }
@@ -504,10 +576,10 @@ export function activate(context: ExtensionContext): void {
   if (initialManagerError)
     warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`, true)
 
-  const retryTimers = new Map<TextEditor, { dueAt: number, timer: ReturnType<typeof setTimeout> }>()
+  const retryTimers = new Map<TextEditor, { dueAt: number, inputKey: string, timer: ReturnType<typeof setTimeout> }>()
   let scheduleContinuation = (_editor: TextEditor) => {}
   let restartSiblingEditors = (_editor: TextEditor, _document: TextDocument) => {}
-  let scheduleRetry = (_editor: TextEditor, _delay: number) => {}
+  let scheduleRetry = (_editor: TextEditor, _inputKey: string, _delay: number) => {}
   interface PendingConfiguration {
     compiled: CompiledConfig
     excludeWarnings: string[]
@@ -515,6 +587,12 @@ export function activate(context: ExtensionContext): void {
   }
   let pendingConfiguration: PendingConfiguration | undefined
   let retryPendingConfiguration = () => false
+  const cancelRetry = (editor: TextEditor) => {
+    const pending = retryTimers.get(editor)
+    if (pending)
+      clearTimeout(pending.timer)
+    retryTimers.delete(editor)
+  }
 
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
@@ -530,11 +608,8 @@ export function activate(context: ExtensionContext): void {
 
     if (!isCurrent())
       return
-    const pendingRetry = retryTimers.get(editor)
-    if (pendingRetry)
-      clearTimeout(pendingRetry.timer)
-    retryTimers.delete(editor)
     const clearEditor = () => {
+      cancelRetry(editor)
       ruleSnapshots.delete(editor)
       scanSessions.delete(editor)
       manager.releaseEditor(editor)
@@ -546,6 +621,7 @@ export function activate(context: ExtensionContext): void {
     }
     const visiblePlan = getVisibleScanPlan(editor)
     if (!visiblePlan.complete) {
+      cancelRetry(editor)
       ruleSnapshots.delete(editor)
       scanSessions.delete(editor)
       manager.releaseEditor(editor)
@@ -563,13 +639,16 @@ export function activate(context: ExtensionContext): void {
       manager.reserveProfile(editor, profileId, priorityStyleIds)
     }
     catch (error) {
+      cancelRetry(editor)
       ruleSnapshots.delete(editor)
       scanSessions.delete(editor)
       warnOnce(`Failed to reserve decoration profile: ${error instanceof Error ? error.message : String(error)}`, true)
       return
     }
 
-    const scanPlan = getScanSlices(editor, visiblePlan)
+    const sessionKey = JSON.stringify([getDocumentCacheIdentity(document), documentVersion, visiblePlan.scanKey, profileId])
+    let session = scanSessions.get(editor)
+    const scanPlan = session?.key === sessionKey ? session.scanPlan : getScanSlices(editor, visiblePlan)
     const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
     const canPreservePrevious = previousSnapshots.size > 0 && [...previousSnapshots.values()].every(
       snapshot => snapshot.documentVersion === documentVersion && snapshot.scanKey === scanPlan.scanKey,
@@ -580,14 +659,15 @@ export function activate(context: ExtensionContext): void {
       ruleSnapshots.delete(editor)
       manager.clearRanges(editor)
     }
-    const sessionKey = JSON.stringify([documentVersion, scanPlan.scanKey, profileId])
     const failureInputKey = JSON.stringify([documentVersion, scanPlan.scanKey])
+    const pendingRetry = retryTimers.get(editor)
+    if (pendingRetry && pendingRetry.inputKey !== failureInputKey)
+      cancelRetry(editor)
     let structuralFailure = structuralFailures.get(editor)
     if (!structuralFailure || structuralFailure.key !== sessionKey) {
       structuralFailure = { key: sessionKey, ruleIds: new Set() }
       structuralFailures.set(editor, structuralFailure)
     }
-    let session = scanSessions.get(editor)
     if (!session || session.key !== sessionKey) {
       session = {
         acceptedRangeKeys: new Set(),
@@ -604,6 +684,7 @@ export function activate(context: ExtensionContext): void {
         nextSliceIndex: 0,
         previousSnapshots,
         scannedSnapshots: new Map(),
+        scanPlan,
       }
       scanSessions.set(editor, session)
     }
@@ -664,7 +745,7 @@ export function activate(context: ExtensionContext): void {
       const failureStatus = failures.getStatus(document, rule.id, failureInputKey)
       if (failureStatus.disabled || structuralFailure.ruleIds.has(rule.id)) {
         if (failureStatus.disabled)
-          scheduleRetry(editor, failureStatus.retryAfterMs)
+          scheduleRetry(editor, failureInputKey, failureStatus.retryAfterMs)
         session.failedRuleIds.add(rule.id)
         acceptPreviousSnapshot(rule.id)
         resetCurrentRuleState(session)
@@ -768,7 +849,7 @@ export function activate(context: ExtensionContext): void {
             session.failedRuleIds.add(rule.id)
             acceptPreviousSnapshot(rule.id)
             const failureStatus = failures.recordFailure(document, rule.id, failureInputKey)
-            scheduleRetry(editor, failureStatus.retryAfterMs)
+            scheduleRetry(editor, failureInputKey, failureStatus.retryAfterMs)
             restartSiblingEditors(editor, document)
             warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried automatically while the editor remains visible, or after the input changes`, true)
           }
@@ -836,7 +917,7 @@ export function activate(context: ExtensionContext): void {
       clearStaleSnapshot()
       session.infrastructureRetryCount++
       if (session.infrastructureRetryCount <= 3)
-        scheduleRetry(editor, infrastructureRetryAfterMs)
+        scheduleRetry(editor, failureInputKey, infrastructureRetryAfterMs)
       else
         scanSessions.delete(editor)
       return
@@ -899,16 +980,19 @@ export function activate(context: ExtensionContext): void {
         scheduler.schedule(sibling, true)
     }
   }
-  scheduleRetry = (editor, delay) => {
+  scheduleRetry = (editor, inputKey, delay) => {
     const retryDelay = Math.max(0, delay)
     const dueAt = Date.now() + retryDelay
     const previous = retryTimers.get(editor)
-    if (previous && previous.dueAt <= dueAt)
+    if (previous && previous.inputKey === inputKey && previous.dueAt <= dueAt)
       return
     if (previous)
       clearTimeout(previous.timer)
     const document = editor.document
+    let entry: { dueAt: number, inputKey: string, timer: ReturnType<typeof setTimeout> }
     const timer = setTimeout(() => {
+      if (retryTimers.get(editor) !== entry)
+        return
       retryTimers.delete(editor)
       if (
         !disposed
@@ -919,7 +1003,8 @@ export function activate(context: ExtensionContext): void {
         scheduler.schedule(editor, true)
       }
     }, retryDelay)
-    retryTimers.set(editor, { dueAt, timer })
+    entry = { dueAt, inputKey, timer }
+    retryTimers.set(editor, entry)
   }
 
   const refreshVisibleEditors = (immediate = true) => {
@@ -948,10 +1033,7 @@ export function activate(context: ExtensionContext): void {
     for (const editor of scheduler.keys) {
       if (!visible.has(editor)) {
         scheduler.remove(editor)
-        const retryTimer = retryTimers.get(editor)
-        if (retryTimer)
-          clearTimeout(retryTimer.timer)
-        retryTimers.delete(editor)
+        cancelRetry(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
         manager.releaseEditor(editor)
@@ -963,6 +1045,7 @@ export function activate(context: ExtensionContext): void {
   const refreshForTheme = () => {
     for (const editor of window.visibleTextEditors) {
       scheduler.invalidate(editor)
+      cancelRetry(editor)
       manager.releaseEditor(editor)
     }
     ruleSnapshots = new WeakMap()
@@ -992,7 +1075,10 @@ export function activate(context: ExtensionContext): void {
       return false
     }
     pendingConfiguration = undefined
-    window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
+    window.visibleTextEditors.forEach((editor) => {
+      scheduler.invalidate(editor)
+      cancelRetry(editor)
+    })
     const previousManager = manager
     manager = nextManager
     compiled = candidate.compiled
@@ -1024,10 +1110,7 @@ export function activate(context: ExtensionContext): void {
       for (const editor of window.visibleTextEditors) {
         if (editor.document !== event.document || !event.contentChanges.length)
           continue
-        const retryTimer = retryTimers.get(editor)
-        if (retryTimer)
-          clearTimeout(retryTimer.timer)
-        retryTimers.delete(editor)
+        cancelRetry(editor)
         scheduler.schedule(editor)
       }
     }),
@@ -1037,10 +1120,7 @@ export function activate(context: ExtensionContext): void {
         if (editor.document !== document)
           continue
         scheduler.remove(editor)
-        const retryTimer = retryTimers.get(editor)
-        if (retryTimer)
-          clearTimeout(retryTimer.timer)
-        retryTimers.delete(editor)
+        cancelRetry(editor)
         ruleSnapshots.delete(editor)
         scanSessions.delete(editor)
         manager.forgetEditor(editor)
