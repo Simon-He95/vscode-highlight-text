@@ -243,6 +243,7 @@ function compileStyleRules(
   layerContextId: string,
   config: CompiledConfig,
   budget: CompilationBudget,
+  maxPatterns = MAX_RULES_PER_MODE,
 ): CompiledRule[] {
   const base: Record<string, unknown> = {
     color,
@@ -251,14 +252,19 @@ function compileStyleRules(
   }
   const option = isStyleObject(raw) ? raw as UserConfig & Record<string, unknown> : undefined
   const rawPatterns = option ? option.match : raw
-  if (Array.isArray(rawPatterns) && rawPatterns.length > MAX_RULES_PER_MODE)
-    config.warnings.push(`Too many match patterns for ${context}: at most ${MAX_RULES_PER_MODE} patterns are allowed`)
+  const patternLimit = Math.min(MAX_RULES_PER_MODE, maxPatterns)
+  if (Array.isArray(rawPatterns) && rawPatterns.length > patternLimit) {
+    const limit = patternLimit < MAX_RULES_PER_MODE
+      ? `limited to the remaining ${patternLimit} rules`
+      : `at most ${MAX_RULES_PER_MODE} patterns are allowed`
+    config.warnings.push(`Too many match patterns for ${context}: ${limit}`)
+  }
   let patterns: PatternInput[]
   if (option) {
-    patterns = normalizePatternsWithBudget(option.match, budget, MAX_RULES_PER_MODE)
+    patterns = normalizePatternsWithBudget(option.match, budget, patternLimit)
   }
   else {
-    patterns = normalizePatternsWithBudget(raw, budget, MAX_RULES_PER_MODE)
+    patterns = normalizePatternsWithBudget(raw, budget, patternLimit)
     if (isPatternTuple(raw))
       config.warnings.push(`Ambiguous rule for ${context}: interpreted as two patterns; wrap it in an array, for example [["pattern", "gm"]], to pass flags`)
   }
@@ -374,7 +380,7 @@ function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', con
     const previousCanonicalKeys = new Set(STYLE_IDS.get(config)?.keys() ?? [])
     try {
       const remaining = maxRules - rules.length
-      const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, JSON.stringify([language, mode, color]), config, budget).slice(0, remaining)
+      const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, JSON.stringify([language, mode, color]), config, budget, remaining)
       if (!compiled.length)
         rollbackStyles(config, previousStyleIds, previousCanonicalKeys)
       rules.push(...compiled)

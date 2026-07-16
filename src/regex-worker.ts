@@ -188,6 +188,7 @@ parentPort.on('message', ({ id, request, reset }) => {
           const span = match.indices && match.indices[0]
           if (
             span
+            && span[0] < span[1]
             && !(request.artificialStart && span[0] === 0)
             && !(request.artificialEnd && span[1] === text.length)
           ) {

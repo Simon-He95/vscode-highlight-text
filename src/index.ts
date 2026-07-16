@@ -6,7 +6,7 @@ import { createSelect, getConfiguration, setConfiguration } from '@vscode-use/ut
 import { deepMerge } from 'lazy-js-utils'
 import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
 import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
-import { DecorationManager } from './decorations'
+import { DecorationBudgetExceededError, DecorationManager } from './decorations'
 import { isRegexExecutionAbortedError, isRegexExecutionBudgetError, isRegexExecutionInfrastructureError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
 import { aggregateSnapshots, RefreshBudget, RuleFailureRegistry } from './runtime-control'
 import { LatestTaskScheduler } from './scheduler'
@@ -501,6 +501,13 @@ export function activate(context: ExtensionContext): void {
   let scheduleContinuation = (_editor: TextEditor) => {}
   let restartSiblingEditors = (_editor: TextEditor, _document: TextDocument) => {}
   let scheduleRetry = (_editor: TextEditor, _delay: number) => {}
+  interface PendingConfiguration {
+    compiled: CompiledConfig
+    excludeWarnings: string[]
+    filter: (path: string) => boolean
+  }
+  let pendingConfiguration: PendingConfiguration | undefined
+  let retryPendingConfiguration = () => false
 
   const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
     const document = editor.document
@@ -955,6 +962,56 @@ export function activate(context: ExtensionContext): void {
     refreshVisibleEditors(true)
   }
 
+  const applyConfiguration = (candidate: PendingConfiguration): boolean => {
+    let nextManager: DecorationManager | undefined
+    try {
+      nextManager = new DecorationManager(candidate.compiled.styles)
+      for (const editor of window.visibleTextEditors) {
+        if (
+          !candidate.filter(getDocumentPath(editor.document))
+          || !editor.visibleRanges.length
+          || !getVisibleScanPlan(editor).complete
+        ) {
+          continue
+        }
+        const selection = getRuleSelection(candidate.compiled, editor.document)
+        nextManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
+      }
+    }
+    catch (error) {
+      nextManager?.dispose()
+      pendingConfiguration = error instanceof DecorationBudgetExceededError ? candidate : undefined
+      warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`, true)
+      return false
+    }
+    pendingConfiguration = undefined
+    window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
+    const previousManager = manager
+    manager = nextManager
+    compiled = candidate.compiled
+    shouldProcess = candidate.filter
+    ruleSnapshots = new WeakMap()
+    scanSessions = new WeakMap()
+    structuralFailures = new WeakMap()
+    failures.clear()
+    executor.resetCache()
+    importantWarned.clear()
+    warned.clear()
+    additionalWarningsSuppressed = false
+    importantToastCount = 0
+    warningToastCount = 0
+    compiled.warnings.forEach(warning => warnOnce(warning))
+    candidate.excludeWarnings.forEach(warning => warnOnce(warning))
+    previousManager.clearEditors()
+    previousManager.dispose()
+    refreshVisibleEditors(true)
+    return true
+  }
+  retryPendingConfiguration = () => {
+    const candidate = pendingConfiguration
+    return candidate ? applyConfiguration(candidate) : false
+  }
+
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((event) => {
       for (const editor of window.visibleTextEditors) {
@@ -981,6 +1038,7 @@ export function activate(context: ExtensionContext): void {
         scanSessions.delete(editor)
         manager.forgetEditor(editor)
       }
+      retryPendingConfiguration()
     }),
     workspace.onDidOpenTextDocument((document) => {
       for (const editor of window.visibleTextEditors) {
@@ -989,13 +1047,18 @@ export function activate(context: ExtensionContext): void {
       }
     }),
     window.onDidChangeActiveTextEditor((editor) => {
+      if (retryPendingConfiguration())
+        return
       if (editor)
         scheduler.schedule(editor, true)
       else
         refreshVisibleEditors()
     }),
     window.onDidChangeTextEditorVisibleRanges(event => scheduler.schedule(event.textEditor)),
-    window.onDidChangeVisibleTextEditors(() => refreshVisibleEditors()),
+    window.onDidChangeVisibleTextEditors(() => {
+      if (!retryPendingConfiguration())
+        refreshVisibleEditors()
+    }),
     workspace.onDidChangeConfiguration((event) => {
       const rulesChanged = event.affectsConfiguration('vscode-highlight-text.rules')
       const excludeChanged = event.affectsConfiguration('vscode-highlight-text.exclude')
@@ -1003,57 +1066,34 @@ export function activate(context: ExtensionContext): void {
         return
       if (!rulesChanged) {
         const excludeWarnings: string[] = []
-        shouldProcess = getExcludeFilter(excludeWarnings)
+        const nextFilter = getExcludeFilter(excludeWarnings)
+        if (pendingConfiguration) {
+          applyConfiguration({
+            ...pendingConfiguration,
+            excludeWarnings,
+            filter: nextFilter,
+          })
+          return
+        }
+        shouldProcess = nextFilter
         excludeWarnings.forEach(warning => warnOnce(warning))
         window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
         refreshVisibleEditors(true)
         return
       }
-      const nextCompiled = compileConfig(getConfiguration('vscode-highlight-text.rules', {}))
       const excludeWarnings: string[] = []
-      const nextFilter = excludeChanged ? getExcludeFilter(excludeWarnings) : shouldProcess
-      let nextManager: DecorationManager | undefined
-      try {
-        nextManager = new DecorationManager(nextCompiled.styles)
-        for (const editor of window.visibleTextEditors) {
-          if (
-            !nextFilter(getDocumentPath(editor.document))
-            || !editor.visibleRanges.length
-            || !getVisibleScanPlan(editor).complete
-          ) {
-            continue
-          }
-          const selection = getRuleSelection(nextCompiled, editor.document)
-          nextManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
-        }
+      const candidate = {
+        compiled: compileConfig(getConfiguration('vscode-highlight-text.rules', {})),
+        excludeWarnings,
+        filter: getExcludeFilter(excludeWarnings),
       }
-      catch (error) {
-        nextManager?.dispose()
-        warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`, true)
-        return
-      }
-      window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
-      const previousManager = manager
-      manager = nextManager
-      compiled = nextCompiled
-      shouldProcess = nextFilter
-      ruleSnapshots = new WeakMap()
-      scanSessions = new WeakMap()
-      structuralFailures = new WeakMap()
-      failures.clear()
-      executor.resetCache()
-      importantWarned.clear()
-      warned.clear()
-      additionalWarningsSuppressed = false
-      importantToastCount = 0
-      warningToastCount = 0
-      compiled.warnings.forEach(warning => warnOnce(warning))
-      excludeWarnings.forEach(warning => warnOnce(warning))
-      previousManager.clearEditors()
-      previousManager.dispose()
-      refreshVisibleEditors(true)
+      pendingConfiguration = undefined
+      applyConfiguration(candidate)
     }),
-    window.onDidChangeActiveColorTheme(() => refreshForTheme()),
+    window.onDidChangeActiveColorTheme(() => {
+      if (!retryPendingConfiguration())
+        refreshForTheme()
+    }),
     commands.registerCommand('vscode-highlight-text.selectTemplate', async () => {
       const select = await createSelect(Object.keys(templates))
       if (!select)

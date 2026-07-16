@@ -218,9 +218,9 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 
 ### 3. You can use `ignoreReg` to filter unwanted content
   ```md
-   "match": ["(function)\\s+([\\w]*)"], this regular match matches `match1: function` and `match2: functionName`
+   "match": [":is"],
    "ignoreReg": [
-    "```([^`])+``` "// I don’t want the content of match to be between ``` and ```
+    "`[^`]*`" // Ignore matches inside inline code in the scanned context
    ]
    ```
 
@@ -232,6 +232,8 @@ Customize the highlight syntax of any language, such as vue, react, svelte, soli
 ## Performance and limits
 
 Large files, expensive regular expressions, and unusually large rule sets may be limited automatically to keep the VS Code Extension Host responsive. Time-limited scans continue from the next unprocessed rule, and limit or configuration problems are reported through VS Code warning messages.
+
+Highlighting uses visible-scope scanning. Each regular-expression input contains a visible range plus at most 20 physical lines of context on each side; multiple visible ranges share a total limit of 200,000 UTF-16 code units. Both `match` and `ignoreReg` are limited to that input, so expressions that require more distant context—such as long Markdown fences, long HTML comments, folded structures, or file-start anchors—are not guaranteed to receive complete document semantics.
 
 For React aliases, overlap priority is deterministic: the exact language (`javascriptreact` or `typescriptreact`) wins over its sibling alias, which wins over generic `react`.
 

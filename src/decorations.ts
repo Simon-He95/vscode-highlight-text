@@ -3,6 +3,13 @@ import { window } from 'vscode'
 
 const MAX_MANAGER_DECORATION_TYPES = 1_500
 
+export class DecorationBudgetExceededError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DecorationBudgetExceededError'
+  }
+}
+
 type DecorationLayer = string | { id: string, styleId: string }
 
 interface DecorationProfile {
@@ -32,7 +39,7 @@ export class DecorationManager {
       return [normalized.id, normalized]
     })).values()].filter(layer => this.styles.has(layer.styleId))
     if (this.typeCount + layers.length > MAX_MANAGER_DECORATION_TYPES)
-      throw new Error(`Decoration type budget exceeded: at most ${MAX_MANAGER_DECORATION_TYPES} active types are allowed`)
+      throw new DecorationBudgetExceededError(`Decoration type budget exceeded: at most ${MAX_MANAGER_DECORATION_TYPES} active types are allowed`)
     const types = new Map<string, TextEditorDecorationType>()
     try {
       // Keep high-to-low creation order: current VS Code prepends decoration CSS rules,

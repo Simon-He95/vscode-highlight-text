@@ -1,12 +1,15 @@
 /* eslint-disable regexp/no-misleading-capturing-group, regexp/no-super-linear-backtracking */
-import type { DecorationRenderOptions, Range } from 'vscode'
+import type { DecorationRenderOptions, ExtensionContext, Range } from 'vscode'
+import type * as vscodeMockType from './mocks/vscode'
 import { EventEmitter } from 'node:events'
+import { getConfiguration } from '@vscode-use/utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as vscode from 'vscode'
 import { window } from 'vscode'
 import packageJson from '../package.json'
 import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
 import { DecorationManager } from '../src/decorations'
-import { getDocumentCacheIdentity, needsVueTsxDetection, nextCodePointOffset, previousCodePointOffset, resetCurrentRuleState, scanRule } from '../src/index'
+import { activate, getDocumentCacheIdentity, needsVueTsxDetection, nextCodePointOffset, previousCodePointOffset, resetCurrentRuleState, scanRule } from '../src/index'
 import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
 import { createRegexWorker, isRegexExecutionAbortedError, isRegexExecutionBudgetError, RegexExecutor } from '../src/regex-worker'
 import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
@@ -26,11 +29,38 @@ function range(start: number, end: number): Range {
   return { start: { line: 0, character: start }, end: { line: 0, character: end } } as Range
 }
 
+const { __events, __resetVscodeMock } = vscode as unknown as typeof vscodeMockType
+
+function createActivationEditor(languageId: string) {
+  const document = {
+    getText: vi.fn(() => ''),
+    isClosed: false,
+    languageId,
+    lineAt: vi.fn(() => ({ rangeIncludingLineBreak: { end: new vscode.Position(0, 0) } })),
+    lineCount: 1,
+    offsetAt: vi.fn(() => 0),
+    positionAt: vi.fn(() => new vscode.Position(0, 0)),
+    uri: { fsPath: `/src/${languageId}.txt`, path: `/src/${languageId}.txt` },
+    version: 1,
+  }
+  return {
+    document,
+    setDecorations: vi.fn(),
+    visibleRanges: [new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0))],
+  }
+}
+
+function disposeContext(context: ExtensionContext): void {
+  for (const disposable of context.subscriptions)
+    disposable.dispose()
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
 })
 afterEach(() => {
   vi.restoreAllMocks()
+  __resetVscodeMock()
 })
 
 describe('regex configuration', () => {
@@ -246,6 +276,35 @@ describe('regex configuration', () => {
     const compiled = compileConfig({ plaintext: { light: { red: Array.from({ length: 1_001 }, (_, index) => `p-${index}`) } } })
     expect(getRulesForLanguage(compiled, 'plaintext', false)).toHaveLength(1_000)
     expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many match patterns'))
+  })
+
+  it('warns when the final style entry exceeds the remaining mode capacity', () => {
+    const compiled = compileConfig({
+      markdown: { dark: {
+        red: Array.from({ length: 999 }, (_, index) => `red-${index}`),
+        blue: ['blue-0', 'blue-1'],
+      } },
+    })
+    expect(getRulesForLanguage(compiled, 'markdown', true)).toHaveLength(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('markdown.dark.blue: limited to the remaining 1 rules'))
+  })
+
+  it('does not charge mode-truncated patterns to later languages', () => {
+    const thousand = (prefix: string) => Array.from({ length: 1_000 }, (_, index) => `${prefix}-${index}`)
+    const compiled = compileConfig({
+      filler0: { light: { red: thousand('f0') } },
+      filler1: { light: { red: thousand('f1') } },
+      filler2: { light: { red: thousand('f2') } },
+      capped: { light: {
+        red: Array.from({ length: 999 }, (_, index) => `capped-red-${index}`),
+        blue: Array.from({ length: 100 }, (_, index) => `capped-blue-${index}`),
+      } },
+      later: { light: {
+        green: Array.from({ length: 980 }, (_, index) => `later-${index}`),
+      } },
+    })
+    expect(getRulesForLanguage(compiled, 'capped', false)).toHaveLength(1_000)
+    expect(getRulesForLanguage(compiled, 'later', false)).toHaveLength(980)
   })
 
   it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
@@ -863,6 +922,21 @@ describe('regex execution', () => {
     executor.dispose()
   })
 
+  it.each([
+    { pattern: 'foo', span: [0, 3], text: 'foo' },
+    { pattern: 'xfoo', span: [0, 4], text: 'xfoo' },
+  ])('ignores zero-width ignore matches consistently in $text', async ({ pattern, span, text }) => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: '(?=foo)', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: pattern, flags: 'gd' },
+      targetGroups: [0],
+      text,
+    })).resolves.toEqual([{ spans: [span] }])
+    executor.dispose()
+  })
+
   it('enforces a shared ignore interval budget', async () => {
     const executor = new RegexExecutor(500)
     const characters = 'abcdefghijk'.split('')
@@ -1474,6 +1548,8 @@ describe('runtime controls', () => {
 
     now = 100
     registry.recordFailure(documentA, 'rule', 'input-2')
+    expect(registry.getStatus(documentA, 'rule', 'input-1')).toEqual({ disabled: true, retryAfterMs: 900 })
+    expect(registry.getStatus(documentA, 'rule', 'input-2')).toEqual({ disabled: true, retryAfterMs: 1_000 })
     now = 200
     registry.recordFailure(documentA, 'rule', 'input-3')
     expect(registry.getStatus(documentA, 'rule', 'input-4')).toEqual({ disabled: true, retryAfterMs: 800 })
@@ -1484,6 +1560,22 @@ describe('runtime controls', () => {
     expect(registry.getStatus(documentA, 'rule', 'input-3')).toEqual({ disabled: true, retryAfterMs: 199 })
     now = 1_201
     expect(registry.getStatus(documentA, 'rule', 'input-3')).toEqual({ disabled: false, retryAfterMs: 0 })
+  })
+
+  it('bounds retained input cooldowns independently per rule', () => {
+    let now = 0
+    const registry = new RuleFailureRegistry<object>(1_000, () => now, 100, 1_000, 2)
+    const document = {}
+
+    registry.recordFailure(document, 'rule', 'input-1')
+    now = 1
+    registry.recordFailure(document, 'rule', 'input-2')
+    now = 2
+    registry.recordFailure(document, 'rule', 'input-3')
+
+    expect(registry.getStatus(document, 'rule', 'input-1').disabled).toBe(false)
+    expect(registry.getStatus(document, 'rule', 'input-2').disabled).toBe(true)
+    expect(registry.getStatus(document, 'rule', 'input-3').disabled).toBe(true)
   })
 
   it('enforces strict range and duration budgets', () => {
@@ -1570,6 +1662,108 @@ describe('scheduler lifecycle', () => {
     await Promise.resolve()
     expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
     expect(editor.setDecorations).not.toHaveBeenCalled()
+  })
+})
+
+describe('configuration transactions', () => {
+  it('retries a budget-blocked configuration after visible profiles are released', async () => {
+    const languages = Array.from({ length: 6 }, (_, index) => `pending-${index}`)
+    let rules: object = Object.fromEntries(languages.map(language => [
+      language,
+      { light: { red: ['pattern-0'] } },
+    ]))
+    vi.mocked(getConfiguration).mockImplementation((name: string, defaultValue: unknown) => name.endsWith('.rules')
+      ? rules
+      : name.endsWith('.exclude')
+        ? []
+        : defaultValue)
+    const editors = languages.map(createActivationEditor)
+    window.visibleTextEditors = editors as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const previousTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    const light = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [
+      `rgb(${index % 256},${Math.floor(index / 256)},0)`,
+      [`pattern-${index}`],
+    ]))
+    rules = Object.fromEntries(languages.map(language => [language, { light }]))
+
+    await __events.configuration.fire({
+      affectsConfiguration: (section: string) => section === 'vscode-highlight-text.rules',
+    })
+    expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Decoration type budget exceeded'))
+    previousTypes.forEach(type => expect(type.dispose).not.toHaveBeenCalled())
+
+    editors.forEach(editor => editor.setDecorations.mockClear())
+    vi.mocked(window.createTextEditorDecorationType).mockClear()
+    window.visibleTextEditors = editors.slice(0, 5) as any
+    await __events.visibleEditors.fire([...window.visibleTextEditors])
+
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1_500)
+    previousTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
+    disposeContext(context)
+    __resetVscodeMock()
+  })
+
+  it('reads the current exclude configuration whenever rules change', async () => {
+    let exclude: string[] = []
+    let rules: object = { plaintext: { light: { red: ['foo'] } } }
+    vi.mocked(getConfiguration).mockImplementation((name: string, defaultValue: unknown) => name.endsWith('.rules')
+      ? rules
+      : name.endsWith('.exclude')
+        ? exclude
+        : defaultValue)
+    const editor = createActivationEditor('plaintext')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const previousType = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    vi.mocked(window.createTextEditorDecorationType).mockClear()
+    exclude = ['**/src/**']
+    rules = { plaintext: { light: { green: ['foo'] } } }
+
+    await __events.configuration.fire({
+      affectsConfiguration: (section: string) => section === 'vscode-highlight-text.rules',
+    })
+
+    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    expect(previousType.dispose).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+    __resetVscodeMock()
+  })
+
+  it('does not retry deterministic decoration creation failures on editor lifecycle events', async () => {
+    let rules: object = { plaintext: { light: { red: ['foo'] } } }
+    vi.mocked(getConfiguration).mockImplementation((name: string, defaultValue: unknown) => name.endsWith('.rules')
+      ? rules
+      : name.endsWith('.exclude')
+        ? []
+        : defaultValue)
+    const editor = createActivationEditor('plaintext')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const previousType = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    const partialType = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => partialType as any)
+      .mockImplementationOnce(() => { throw new Error('invalid next style') })
+    rules = { plaintext: { light: { green: ['foo'], yellow: ['bar'] } } }
+    await __events.configuration.fire({ affectsConfiguration: () => true })
+    expect(partialType.dispose).toHaveBeenCalledTimes(1)
+    expect(previousType.dispose).not.toHaveBeenCalled()
+
+    editor.setDecorations.mockClear()
+    vi.mocked(window.createTextEditorDecorationType).mockClear()
+    await __events.visibleEditors.fire([...window.visibleTextEditors])
+
+    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    expect(previousType.dispose).not.toHaveBeenCalled()
+    disposeContext(context)
+    __resetVscodeMock()
   })
 })
 
