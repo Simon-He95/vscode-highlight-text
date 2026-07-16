@@ -276,6 +276,13 @@ export function containsVueTsxBlock(text: string): boolean {
     const start = lower.indexOf('<', cursor)
     if (start < 0)
       return false
+    if (lower.startsWith('<!--', start)) {
+      const commentEnd = lower.indexOf('-->', start + 4)
+      if (commentEnd < 0)
+        return false
+      cursor = commentEnd + 3
+      continue
+    }
     const isScript = lower.startsWith('<script', start)
     const isTemplate = !isScript && lower.startsWith('<template', start)
     if (!isScript && !isTemplate) {
@@ -317,7 +324,7 @@ export function containsVueTsxBlock(text: string): boolean {
       continue
     }
     const tag = lower.slice(nameEnd, end)
-    if (/\blang\s*=\s*["']tsx["']/.test(tag))
+    if (/(?:^|\s)lang\s*=\s*["']tsx["']/.test(tag))
       return true
     cursor = end + 1
   }

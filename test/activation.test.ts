@@ -102,6 +102,10 @@ describe('vue TSX language detection', () => {
     const beyondLimit = createEditor(`${'x'.repeat(300_001)}<script lang="tsx"></script>`, 'limited-vue')
     beyondLimit.document.languageId = 'vue'
     expect(getRuleLanguageId(beyondLimit.document as any)).toBe('vue')
+
+    expect(containsVueTsxBlock('<script data-lang="tsx"></script>')).toBe(false)
+    expect(containsVueTsxBlock('<!-- <script lang="tsx"></script> -->')).toBe(false)
+    expect(containsVueTsxBlock('<!-- ignored --><script lang="tsx"></script>')).toBe(true)
   })
 })
 
