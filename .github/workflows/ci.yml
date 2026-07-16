@@ -4,11 +4,9 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
-
   merge_group: {}
 
 jobs:
@@ -16,73 +14,131 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
-          version: 9
-
-      - name: Set node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18.18.2
+          node-version: 20
           cache: pnpm
-
-      - name: Setup
-        run: npm i -g @antfu/ni
-
-      - name: Install
-        run: nci
-
-      - name: Lint
-        run: nr lint
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
 
   test:
     runs-on: ${{ matrix.os }}
-
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node_version: [18.18.2, lts/*]
+        node-version: [20, 22]
         include:
           - os: macos-latest
-            node_version: lts/*
+            node-version: 22
           - os: windows-latest
-            node_version: lts/*
-      fail-fast: false
-
+            node-version: 22
     steps:
       - name: Set git to use LF
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
-
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
-          version: 9
-
-      - name: Set node ${{ matrix.node_version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node_version }}
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm typecheck
 
-      - run: corepack enable
+  runtime-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm exec tsup src/regex-worker.ts --format cjs --target node16 --out-dir temp/runtime-smoke
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 16.14.2
+      - name: Execute regex worker on the minimum VS Code runtime
+        run: |
+          node --check dist/index.js
+          node - <<'NODE'
+          const { RegexExecutor } = require('./temp/runtime-smoke/regex-worker.js')
 
-      - name: Setup
-        run: npm i -g @antfu/ni
+          const request = (source, text) => ({
+            ignores: [],
+            maxMatches: 10,
+            pattern: { source, flags: 'gdu' },
+            targetGroups: [0],
+            text,
+          })
 
-      - name: Install
-        run: nci
+          async function main() {
+            const executor = new RegexExecutor(100)
+            const unicode = await executor.execute({ ...request('(?=(.))', '😀a'), targetGroups: [1] })
+            if (JSON.stringify(unicode) !== JSON.stringify([{ spans: [[0, 2]] }, { spans: [[2, 3]] }]))
+              throw new Error('Unicode indices smoke failed')
 
-      - name: Build
-        run: nr build
+            await executor.execute(request('(a+)+$', `${'a'.repeat(20_000)}b`)).then(
+              () => { throw new Error('Expected catastrophic regex timeout') },
+              error => {
+                if (!String(error.message).includes('exceeded 100ms'))
+                  throw error
+              },
+            )
+            const recovered = await executor.execute(request('TARGET', 'TARGET'))
+            if (JSON.stringify(recovered) !== JSON.stringify([{ spans: [[0, 6]] }]))
+              throw new Error('Worker timeout recovery smoke failed')
 
-      - name: Test
-        run: nr test
+            const controller = new AbortController()
+            const aborted = executor.execute(request('(a+)+$', `${'a'.repeat(20_000)}b`), controller.signal)
+            setTimeout(() => controller.abort(), 10)
+            await aborted.then(
+              () => { throw new Error('Expected active worker abort') },
+              error => {
+                if (!String(error.message).includes('cancelled'))
+                  throw error
+              },
+            )
+            await executor.execute(request('OK', 'OK'))
+            executor.dispose()
+          }
 
-      - name: Typecheck
-        run: nr typecheck
+          main().catch((error) => {
+            console.error(error)
+            process.exitCode = 1
+          })
+          NODE
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run pack
+      - name: Verify extension package contents
+        run: |
+          unzip -Z1 vscode-highlight-text-*.vsix | sed '/\/$/d' | sort > actual-files.txt
+          cat > expected-files.txt <<'EOF'
+          [Content_Types].xml
+          extension.vsixmanifest
+          extension/LICENSE.txt
+          extension/README_zh.md
+          extension/dist/index.js
+          extension/icon.png
+          extension/package.json
+          extension/readme.md
+          EOF
+          sort -o expected-files.txt expected-files.txt
+          diff -u expected-files.txt actual-files.txt

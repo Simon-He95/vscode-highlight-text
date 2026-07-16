@@ -3,6 +3,7 @@
   "name": "vscode-highlight-text",
   "displayName": "vscode-highlight-text",
   "version": "0.0.49",
+  "packageManager": "pnpm@9.15.9",
   "description": "A VSCode extension to highlight text in various languages like Vue, React, Svelte, Solid, Astro, and Markdown.",
   "author": "Simon He <https://github.com/Simon-He95>",
   "license": "MIT",
@@ -41,7 +42,7 @@
     "vscode": "^1.77.0"
   },
   "activationEvents": [
-    "onStartupFinished"
+    "onLanguage"
   ],
   "contributes": {
     "configuration": {
@@ -58,7 +59,237 @@
             "solid": {},
             "markdown": {}
           },
-          "description": "Highlight styles for Vue, React, Svelte, Solid, Astro, and Markdown."
+          "description": "Highlight styles for Vue, React, Svelte, Solid, Astro, and Markdown.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "light": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "string"
+                              }
+                            ],
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "match"
+                      ],
+                      "properties": {
+                        "match": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "array",
+                              "items": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "array",
+                                    "items": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "string"
+                                      }
+                                    ],
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                  }
+                                ]
+                              }
+                            }
+                          ]
+                        },
+                        "colors": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "matchCss": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "ignoreReg": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "array",
+                                "items": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "string"
+                                  }
+                                ],
+                                "minItems": 2,
+                                "maxItems": 2
+                              }
+                            ]
+                          }
+                        },
+                        "background": {
+                          "type": "string",
+                          "deprecationMessage": "Deprecated alias for backgroundColor. CSS gradients, images, and shorthand values are no longer supported."
+                        },
+                        "backgroundColor": {
+                          "type": "string",
+                          "description": "Background color for the highlighted text."
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  ]
+                }
+              },
+              "dark": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "string"
+                              }
+                            ],
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "match"
+                      ],
+                      "properties": {
+                        "match": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "array",
+                              "items": {
+                                "anyOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "array",
+                                    "items": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "string"
+                                      }
+                                    ],
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                  }
+                                ]
+                              }
+                            }
+                          ]
+                        },
+                        "colors": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "matchCss": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "ignoreReg": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "array",
+                                "items": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "string"
+                                  }
+                                ],
+                                "minItems": 2,
+                                "maxItems": 2
+                              }
+                            ]
+                          }
+                        },
+                        "background": {
+                          "type": "string",
+                          "deprecationMessage": "Deprecated alias for backgroundColor. CSS gradients, images, and shorthand values are no longer supported."
+                        },
+                        "backgroundColor": {
+                          "type": "string",
+                          "description": "Background color for the highlighted text."
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "vscode-highlight-text.exclude": {
           "type": "array",
@@ -66,7 +297,12 @@
             "**/dist/**",
             "**/node_modules/**"
           ],
-          "description": "Directories to be skipped."
+          "description": "Directories to be skipped.",
+          "items": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "maxItems": 100
         }
       }
     },
@@ -82,6 +318,8 @@
     "test": "vitest run --reporter=verbose",
     "test:watch": "vitest --watch",
     "build": "tsup src/index.ts --external vscode",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "vscode:prepublish": "pnpm check && pnpm build",
     "pack": "vsce package --no-dependencies",
     "lint": "eslint . --cache",
     "lint:fix": "eslint . --fix",
@@ -91,14 +329,15 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^3.16.0",
-    "@rollup/pluginutils": "^5.1.4",
-    "@types/node": "^18.19.111",
+    "@types/node": "^16.18.126",
+    "@types/picomatch": "^4.0.2",
     "@types/vscode": "1.77.0",
     "@vscode-use/utils": "^0.1.58",
     "@vscode/vsce": "^3.5.0",
     "bumpp": "^9.11.1",
     "eslint": "^9.28.0",
     "lazy-js-utils": "^0.1.44",
+    "picomatch": "^4.0.2",
     "tsup": "^6.7.0",
     "typescript": "^5.8.3",
     "vitest": "^0.29.8"

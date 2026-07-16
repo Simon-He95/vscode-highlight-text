@@ -1,0 +1,1997 @@
+/* eslint-disable regexp/no-misleading-capturing-group, regexp/no-super-linear-backtracking */
+import type { DecorationRenderOptions, ExtensionContext, Range } from 'vscode'
+import type * as vscodeMockType from './mocks/vscode'
+import { EventEmitter } from 'node:events'
+import { getConfiguration } from '@vscode-use/utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as vscode from 'vscode'
+import { window } from 'vscode'
+import packageJson from '../package.json'
+import { compileConfig, createExcludeFilter, getRulesForLanguage, normalizeStyle } from '../src/config'
+import { DecorationManager } from '../src/decorations'
+import { activate, getDocumentCacheIdentity, needsVueTsxDetection, nextCodePointOffset, previousCodePointOffset, resetCurrentRuleState, scanRule } from '../src/index'
+import { compilePattern, isRegexSafe, normalizeFlags, safeMatchAll } from '../src/regex'
+import { createRegexWorker, isRegexExecutionAbortedError, isRegexExecutionBudgetError, RegexExecutor } from '../src/regex-worker'
+import { aggregateSnapshots, BoundedSet, RefreshBudget, RuleFailureRegistry } from '../src/runtime-control'
+import { LatestTaskScheduler } from '../src/scheduler'
+
+vi.mock('@vscode-use/utils', () => ({
+  createSelect: vi.fn(),
+  getConfiguration: vi.fn((_name: string, defaultValue: unknown) => defaultValue),
+  setConfiguration: vi.fn(),
+}))
+
+class MockEditor {
+  public setDecorations = vi.fn()
+}
+
+function range(start: number, end: number): Range {
+  return { start: { line: 0, character: start }, end: { line: 0, character: end } } as Range
+}
+
+const { __events, __resetVscodeMock } = vscode as unknown as typeof vscodeMockType
+
+function createActivationEditor(languageId: string) {
+  const document = {
+    getText: vi.fn(() => ''),
+    isClosed: false,
+    languageId,
+    lineAt: vi.fn(() => ({ rangeIncludingLineBreak: { end: new vscode.Position(0, 0) } })),
+    lineCount: 1,
+    offsetAt: vi.fn(() => 0),
+    positionAt: vi.fn(() => new vscode.Position(0, 0)),
+    uri: { fsPath: `/src/${languageId}.txt`, path: `/src/${languageId}.txt` },
+    version: 1,
+  }
+  return {
+    document,
+    setDecorations: vi.fn(),
+    visibleRanges: [new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0))],
+  }
+}
+
+function disposeContext(context: ExtensionContext): void {
+  for (const disposable of context.subscriptions)
+    disposable.dispose()
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+})
+afterEach(() => {
+  vi.restoreAllMocks()
+  __resetVscodeMock()
+})
+
+describe('regex configuration', () => {
+  it('requires nested tuples for flags in the manifest schema', () => {
+    const rulesSchema = packageJson.contributes.configuration.properties['vscode-highlight-text.rules'] as any
+    const serialized = JSON.stringify(rulesSchema)
+    expect(serialized).not.toContain('$ref')
+    const match = rulesSchema.additionalProperties.properties.light.additionalProperties.anyOf[1].properties.match
+    expect(match.anyOf[0]).toEqual({ type: 'string' })
+    expect(match.anyOf[1].items.anyOf).toHaveLength(2)
+    expect(rulesSchema.default).toEqual({ astro: {}, markdown: {}, react: {}, solid: {}, svelte: {}, vue: {} })
+  })
+
+  it('normalizes flags and accepts JavaScript assertions and named groups', () => {
+    expect(normalizeFlags('m')).toBe('mgd')
+    expect(normalizeFlags('dg')).toBe('dg')
+    expect(() => normalizeFlags('z')).toThrow('Invalid regular expression flags: z')
+    expect(() => normalizeFlags('gg')).toThrow('Invalid regular expression flags: gg')
+    expect(() => normalizeFlags('uv')).toThrow('Invalid regular expression flags: uv')
+    expect(() => compilePattern(['(?=foo)', 'm'])).not.toThrow()
+    expect(() => compilePattern(['(?<=foo)\\w+', 'm'])).not.toThrow()
+    expect(() => compilePattern(['(?<name>foo)', 'm'])).not.toThrow()
+    expect(compilePattern(['foo', 'y']).flags).toContain('y')
+    expect(compilePattern(['foo', '']).flags).toBe('gd')
+  })
+
+  it('warns about nested quantifiers without rejecting valid syntax', () => {
+    const nestedPlus = '(a+)+$'
+    expect(isRegexSafe(new RegExp(nestedPlus))).toBe(false)
+    expect(isRegexSafe(/(?!test)/)).toBe(true)
+    expect(isRegexSafe(/((a+)b)+/)).toBe(false)
+    expect(isRegexSafe(/(ab)+/)).toBe(true)
+    expect(() => compilePattern([nestedPlus, 'm'])).not.toThrow()
+
+    const compiled = compileConfig({ vue: { light: {
+      red: [nestedPlus],
+      blue: ['(ab{2})+'],
+      green: { match: ['safe'], ignoreReg: [nestedPlus] },
+    } } })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(3)
+    expect(compiled.warnings).toContain(`Potentially expensive regular expression for vue.light.red: ${nestedPlus}`)
+    expect(compiled.warnings).toContain(`Potentially expensive ignoreReg for vue.light.green: ${nestedPlus}`)
+  })
+
+  it('rejects oversized target and ignore arrays before worker execution', () => {
+    const oversized = Array.from({ length: 101 }, () => 'red')
+    const compiled = compileConfig({
+      vue: { light: {
+        red: { match: ['foo'], colors: oversized },
+        blue: { match: ['bar'], ignoreReg: oversized },
+      } },
+    })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toEqual([])
+    expect(compiled.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('at most 100 targets'),
+      expect.stringContaining('at most 100 patterns'),
+    ]))
+  })
+
+  it('caps merged composite languages and React aliases', () => {
+    const patternsA = Array.from({ length: 600 }, (_, index) => `a${index}`)
+    const patternsB = Array.from({ length: 600 }, (_, index) => `b${index}`)
+    const reactPatterns = Array.from({ length: 1_000 }, (_, index) => `r${index}`)
+    const compiled = compileConfig({
+      'vue|a': { light: { red: patternsA } },
+      'vue|b': { light: { blue: patternsB } },
+      'react': { light: { red: reactPatterns } },
+      'javascriptreact': { light: { blue: reactPatterns } },
+      'typescriptreact': { light: { green: reactPatterns } },
+    })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(1_000)
+    const jsxRules = getRulesForLanguage(compiled, 'javascriptreact', false)
+    const tsxRules = getRulesForLanguage(compiled, 'typescriptreact', false)
+    expect(jsxRules).toHaveLength(1_000)
+    expect(tsxRules).toHaveLength(1_000)
+    expect(jsxRules[0].context).toContain('javascriptreact')
+    expect(tsxRules[0].context).toContain('typescriptreact')
+    const aliasWarnings: string[] = []
+    getRulesForLanguage(compiled, 'javascriptreact', false, aliasWarnings)
+    expect(aliasWarnings).toContainEqual(expect.stringContaining('after alias merging'))
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many merged rules for vue'))
+  })
+
+  it('merges a composite key into an existing language after language capacity is full', () => {
+    const raw = Object.fromEntries([
+      ['plaintext', { light: { red: ['first'] } }],
+      ...Array.from({ length: 99 }, (_, index) => [`lang${index}`, { light: {} }]),
+      ['newLanguage|plaintext', { light: { blue: ['second'] } }],
+    ])
+    const compiled = compileConfig(raw)
+    expect(getRulesForLanguage(compiled, 'plaintext', false).map(rule => rule.pattern.source)).toEqual(['second', 'first'])
+    expect(compiled.languages.has('newLanguage')).toBe(false)
+  })
+
+  it('counts shared composite rules once under the global rule budget', () => {
+    const patterns = Array.from({ length: 1_000 }, (_, index) => `pattern-${index}`)
+    const compiled = compileConfig({
+      'a|b|c|d|e|f': { light: { red: patterns } },
+    })
+    for (const language of ['a', 'b', 'c', 'd', 'e', 'f'])
+      expect(getRulesForLanguage(compiled, language, false)).toHaveLength(1_000)
+  })
+
+  it('caps global languages, rule entries, and retained styles', () => {
+    const patterns = Array.from({ length: 1_000 }, (_, index) => `p${index}`)
+    const raw = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [
+      `language${index}`,
+      { light: { [`color${index}`]: patterns } },
+    ]))
+    const compiled = compileConfig(raw)
+    const totalRules = [...compiled.languages.values()]
+      .reduce((total, modes) => total + modes.dark.length + modes.light.length, 0)
+    expect(totalRules).toBeLessThanOrEqual(5_000)
+    expect(compiled.styles.size).toBeLessThanOrEqual(5)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('compilation budget was reached'))
+
+    const tooManyLanguages = compileConfig(Object.fromEntries(
+      Array.from({ length: 101 }, (_, index) => [`language${index}`, { light: { red: [`p${index}`] } }]),
+    ))
+    expect(tooManyLanguages.languages.size).toBe(100)
+    expect(tooManyLanguages.warnings.length).toBeLessThanOrEqual(100)
+  })
+
+  it('charges invalid inputs to the compilation budget and rolls back their styles', () => {
+    const invalidRules = Object.fromEntries(Array.from({ length: 1_000 }, (_, index) => [
+      `color-${index}`,
+      ['('],
+    ]))
+    const compiled = compileConfig({
+      plaintext: { light: { ...invalidRules, green: ['foo'] } },
+    })
+    const rules = getRulesForLanguage(compiled, 'plaintext', false)
+    expect(rules.some(rule => rule.pattern.source === 'foo')).toBe(true)
+    expect(compiled.styles.size).toBe(1)
+    expect(compiled.warnings.length).toBeLessThanOrEqual(100)
+  })
+
+  it('rejects an excessively deep style without recursing in serialization', () => {
+    let before: Record<string, unknown> = { contentText: 'x' }
+    for (let depth = 0; depth < 20; depth++)
+      before = { nested: before }
+    const compiled = compileConfig({ plaintext: { light: { red: { before, match: ['foo'] } } } })
+    expect(getRulesForLanguage(compiled, 'plaintext', false)).toEqual([])
+    expect(compiled.styles).toHaveLength(0)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Style exceeds the complexity limit'))
+  })
+
+  it('normalizes styles into null-prototype objects without __proto__ mutation', () => {
+    const raw = Object.create(null) as Record<string, unknown>
+    raw.color = 'red'
+    Object.defineProperty(raw, '__proto__', { enumerable: true, value: { before: { contentText: 'unsafe' } } })
+    const style = normalizeStyle(raw) as Record<string, unknown>
+    expect(Object.getPrototypeOf(style)).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(style, '__proto__')).toBe(true)
+    expect(style.color).toBe('red')
+  })
+
+  it('bounds top-level style copying, key size, and matchCss styles', () => {
+    const wide = Object.fromEntries(Array.from({ length: 501 }, (_, index) => [`p${index}`, index]))
+    expect(() => normalizeStyle(wide)).toThrow('Style exceeds the property limit')
+    expect(() => normalizeStyle({ ['k'.repeat(20_001)]: true })).toThrow('Style exceeds the string-size limit')
+
+    const compiled = compileConfig({
+      plaintext: { light: { red: { match: ['(foo)'], matchCss: [wide] } } },
+    })
+    expect(getRulesForLanguage(compiled, 'plaintext', false)).toEqual([])
+    expect(compiled.styles.size).toBe(0)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Style exceeds the property limit'))
+  })
+
+  it('rolls back canonical style IDs and cannot bypass the global style cap', () => {
+    const light: Record<string, unknown> = {}
+    for (let rule = 0; rule < 11; rule++) {
+      const matchCss = Array.from({ length: 100 }, (_, target) => ({ color: `rgb(${rule},${target},0)` }))
+      light[`bad-${rule}`] = { match: ['('], matchCss }
+      light[`good-${rule}`] = { match: [`good-${rule}`], matchCss }
+    }
+    const compiled = compileConfig({ plaintext: { light } })
+    expect(compiled.styles.size).toBe(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Configuration exceeds 1000 unique styles'))
+    expect([...compiled.styles.keys()]).toSatisfy((ids: string[]) => new Set(ids).size === ids.length)
+  })
+
+  it('stops reading configuration values after compilation budgets are reached', () => {
+    const raw: Record<string, unknown> = {}
+    for (let index = 0; index < 101; index++) {
+      Object.defineProperty(raw, `language${index}`, {
+        enumerable: true,
+        get: () => {
+          if (index >= 100)
+            throw new Error('read past language budget')
+          return { light: { red: [`p${index}`] } }
+        },
+      })
+    }
+    expect(() => compileConfig(raw)).not.toThrow()
+
+    const mode: Record<string, unknown> = {}
+    for (let index = 0; index < 1_001; index++) {
+      Object.defineProperty(mode, `color${index}`, {
+        enumerable: true,
+        get: () => {
+          if (index >= 1_000)
+            throw new Error('read past mode budget')
+          return [`p${index}`]
+        },
+      })
+    }
+    expect(() => compileConfig({ plaintext: { light: mode } })).not.toThrow()
+  })
+
+  it('warns when a style pattern array is truncated', () => {
+    const compiled = compileConfig({ plaintext: { light: { red: Array.from({ length: 1_001 }, (_, index) => `p-${index}`) } } })
+    expect(getRulesForLanguage(compiled, 'plaintext', false)).toHaveLength(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Too many match patterns'))
+  })
+
+  it('warns when the final style entry exceeds the remaining mode capacity', () => {
+    const compiled = compileConfig({
+      markdown: { dark: {
+        red: Array.from({ length: 999 }, (_, index) => `red-${index}`),
+        blue: ['blue-0', 'blue-1'],
+      } },
+    })
+    expect(getRulesForLanguage(compiled, 'markdown', true)).toHaveLength(1_000)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('markdown.dark.blue: limited to the remaining 1 rules'))
+  })
+
+  it('does not charge mode-truncated patterns to later languages', () => {
+    const thousand = (prefix: string) => Array.from({ length: 1_000 }, (_, index) => `${prefix}-${index}`)
+    const compiled = compileConfig({
+      filler0: { light: { red: thousand('f0') } },
+      filler1: { light: { red: thousand('f1') } },
+      filler2: { light: { red: thousand('f2') } },
+      capped: { light: {
+        red: Array.from({ length: 999 }, (_, index) => `capped-red-${index}`),
+        blue: Array.from({ length: 100 }, (_, index) => `capped-blue-${index}`),
+      } },
+      later: { light: {
+        green: Array.from({ length: 980 }, (_, index) => `later-${index}`),
+      } },
+    })
+    expect(getRulesForLanguage(compiled, 'capped', false)).toHaveLength(1_000)
+    expect(getRulesForLanguage(compiled, 'later', false)).toHaveLength(980)
+  })
+
+  it('supports pattern strings and nested flag tuples without reinterpreting top-level arrays', () => {
+    const compiled = compileConfig({
+      vue: {
+        light: {
+          red: { match: 'foo' },
+          blue: { match: [['bar', 'gi']] },
+          green: { match: [['baz', 'm'], 'qux'] },
+          legacy: ['[0-9]+', 'gi'],
+        },
+      },
+    })
+    expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern)).toEqual([
+      { source: 'foo', flags: 'gmd' },
+      { source: 'bar', flags: 'gid' },
+      { source: 'baz', flags: 'mgd' },
+      { source: 'qux', flags: 'gmd' },
+      { source: '[0-9]+', flags: 'gmd' },
+      { source: 'gi', flags: 'gmd' },
+    ])
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Ambiguous rule for vue.light.legacy'))
+  })
+
+  it('keeps explicit match arrays unambiguous', () => {
+    const compiled = compileConfig({ vue: { light: { red: { match: ['foo', 'gm'] } } } })
+    expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern.source)).toEqual(['foo', 'gm'])
+  })
+
+  it('deduplicates patterns after source and flag normalization', () => {
+    const compiled = compileConfig({ plaintext: { light: { red: ['foo', ['foo', 'mg']] } } })
+    const rules = getRulesForLanguage(compiled, 'plaintext', false)
+    expect(rules).toHaveLength(1)
+    expect(new Set(rules.map(rule => rule.id)).size).toBe(1)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('Duplicate pattern for plaintext.light.red was ignored'))
+  })
+
+  it('fails closed when any ignoreReg pattern is invalid', () => {
+    const invalidOnly = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['('] } } } })
+    const mixed = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', '('] } } } })
+    const invalidType = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', 123] } } } })
+    const invalidTuple = compileConfig({ plaintext: { light: { red: { match: ['SECRET'], ignoreReg: ['valid', ['broken-tuple']] } } } })
+    expect(getRulesForLanguage(invalidOnly, 'plaintext', false)).toEqual([])
+    expect(getRulesForLanguage(mixed, 'plaintext', false)).toEqual([])
+    expect(getRulesForLanguage(invalidType, 'plaintext', false)).toEqual([])
+    expect(getRulesForLanguage(invalidTuple, 'plaintext', false)).toEqual([])
+    expect(invalidOnly.styles.size).toBe(0)
+    expect(mixed.styles.size).toBe(0)
+    expect(invalidType.styles.size).toBe(0)
+    expect(invalidTuple.styles.size).toBe(0)
+  })
+
+  it('accepts an empty ignoreReg without warnings', () => {
+    const compiled = compileConfig({ vue: { light: { red: { match: ['foo'], ignoreReg: [] } } } })
+    expect(getRulesForLanguage(compiled, 'vue', false)).toHaveLength(1)
+    expect(compiled.warnings).toEqual([])
+  })
+
+  it('uses collision-free structured rule and layer identifiers', () => {
+    const compiled = compileConfig({
+      'lang|a': { light: { 'x.light.red': { color: 'blue', match: ['foo'] } } },
+      'lang|a.light.x': { light: { red: ['foo'] } },
+    })
+    const rules = getRulesForLanguage(compiled, 'lang', false)
+    expect(new Set(rules.map(rule => rule.id)).size).toBe(2)
+    expect(new Set(rules.map(rule => rule.layerContextId)).size).toBe(2)
+  })
+
+  it('supports language IDs that match object prototype names', () => {
+    const compiled = compileConfig({ constructor: { light: { red: ['foo'] } } })
+    for (const languageId of ['constructor', 'toString', '__proto__'])
+      expect(() => getRulesForLanguage(compiled, languageId, false)).not.toThrow()
+    expect(getRulesForLanguage(compiled, 'constructor', false)).toHaveLength(1)
+  })
+
+  it('preserves React aliases across JSX and TSX', () => {
+    const compiled = compileConfig({
+      react: { light: { red: ['react-rule'] } },
+      javascriptreact: { light: { blue: ['jsx-rule'] } },
+      typescriptreact: { light: { green: ['tsx-rule'] } },
+    })
+    const sources = (language: string) => getRulesForLanguage(compiled, language, false).map(rule => rule.pattern.source)
+    expect(sources('javascriptreact')).toEqual(['jsx-rule', 'tsx-rule', 'react-rule'])
+    expect(sources('typescriptreact')).toEqual(['tsx-rule', 'jsx-rule', 'react-rule'])
+  })
+
+  it('survives malformed colors and matchCss while compiling valid siblings', () => {
+    const compiled = compileConfig({
+      vue: {
+        light: {
+          red: { match: ['foo'], colors: 'red' },
+          blue: { match: ['bar'], matchCss: {} },
+          green: { match: ['baz'], colors: [null] },
+          orange: { match: ['qux'], matchCss: ['invalid'] },
+          black: { match: ['ok'] },
+        },
+      },
+    })
+    expect(getRulesForLanguage(compiled, 'vue', false).map(rule => rule.pattern.source)).toEqual(['ok'])
+    expect(compiled.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('Invalid colors for vue.light.red'),
+      expect.stringContaining('Invalid matchCss for vue.light.blue'),
+      expect.stringContaining('Invalid colors entries for vue.light.green'),
+      expect.stringContaining('Invalid matchCss entries for vue.light.orange'),
+    ]))
+  })
+
+  it('matches relative excludes and ordered negated re-includes independently of cwd', () => {
+    const filter = createExcludeFilter(['dist/**', '!dist/keep/**'])
+    expect(filter('/workspace/project/dist/index.js')).toBe(false)
+    expect(filter('/workspace/project/dist/keep/index.js')).toBe(true)
+    expect(filter('/workspace/project/src/index.js')).toBe(true)
+    const windowsFilter = createExcludeFilter(['C:\\Repo\\dist\\**'])
+    expect(windowsFilter('/c:/repo/dist/index.js')).toBe(false)
+    expect(windowsFilter('c:\\REPO\\src\\index.js')).toBe(true)
+    expect(createExcludeFilter(['Build/**'])('C:\\Repo\\Build\\index.js')).toBe(false)
+    expect(createExcludeFilter(['BUILD/**'])('\\\\Server\\Share\\build\\index.js')).toBe(false)
+  })
+
+  it('bounds exclude pattern count and length before matching', () => {
+    const patterns = [...Array.from({ length: 100 }, (_, index) => `missing-${index}/**`), '**/blocked/**']
+    const filter = createExcludeFilter(patterns)
+    expect(filter('/repo/blocked/file.js')).toBe(true)
+    const longFilter = createExcludeFilter(['x'.repeat(1_001)])
+    expect(longFilter(`/repo/${'x'.repeat(1_001)}`)).toBe(true)
+    expect(packageJson.contributes.configuration.properties['vscode-highlight-text.exclude']).toMatchObject({
+      maxItems: 100,
+      items: { maxLength: 1_000 },
+    })
+  })
+
+  it('reports ignored and truncated exclude patterns', () => {
+    const warnings: string[] = []
+    createExcludeFilter([
+      ...Array.from({ length: 99 }, (_, index) => `missing-${index}/**`),
+      42,
+      '**/not-compiled/**',
+    ], warnings)
+    expect(warnings).toContainEqual(expect.stringContaining('limited to 100 patterns'))
+    expect(warnings).toContainEqual(expect.stringContaining('Non-string exclude patterns'))
+
+    const longWarnings: string[] = []
+    createExcludeFilter(['x'.repeat(1_001)], longWarnings)
+    expect(longWarnings).toContainEqual(expect.stringContaining('exceeds 1000 characters'))
+  })
+
+  it('normalizes styles, empty excludes, and rule-local ignores', () => {
+    const source = { background: 'red', textDecoration: 'underline' }
+    expect(normalizeStyle(source)).toEqual({ backgroundColor: 'red', textDecoration: 'underline' })
+    expect(normalizeStyle(source, { backgroundColor: 'blue' })).toEqual({ backgroundColor: 'blue', textDecoration: 'underline' })
+    expect(source).toEqual({ background: 'red', textDecoration: 'underline' })
+    expect(createExcludeFilter([])('/workspace/src/example.ts')).toBe(true)
+    expect(createExcludeFilter(['**/dist/**'])('/workspace/dist/example.js')).toBe(false)
+
+    const compiled = compileConfig({ vue: { light: {
+      red: { match: ['foo'], ignoreReg: ['bar'] },
+      blue: { match: ['bar'] },
+    } } })
+    const rules = getRulesForLanguage(compiled, 'vue', false)
+    expect(rules[0].ignores).toHaveLength(1)
+    expect(rules[1].ignores).toHaveLength(0)
+  })
+
+  it('warns when deprecated background values use unsupported shorthand syntax', () => {
+    const compiled = compileConfig({
+      plaintext: { light: {
+        red: { match: ['foo'], background: 'linear-gradient(red, blue)' },
+        blue: { match: ['bar'], background: 'rgb(0 0 0 / 50%)' },
+        green: { match: ['baz'], matchCss: [{ background: 'url(image.png) center / cover' }] },
+      } },
+    })
+    expect(compiled.warnings).toHaveLength(2)
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('plaintext.light.red'))
+    expect(compiled.warnings).toContainEqual(expect.stringContaining('matchCss[0]'))
+
+    const rulesSchema = packageJson.contributes.configuration.properties['vscode-highlight-text.rules'] as any
+    for (const theme of ['light', 'dark']) {
+      const properties = rulesSchema.additionalProperties.properties[theme].additionalProperties.anyOf[1].properties
+      expect(properties.backgroundColor).toMatchObject({ type: 'string' })
+      expect(properties.background.deprecationMessage).toContain('Deprecated alias for backgroundColor')
+    }
+  })
+
+  it('caches Vue and Vue TSX rule equivalence by config and theme', () => {
+    const compiled = compileConfig({
+      vue: { light: { red: ['foo'] } },
+      vuetsx: { light: { blue: ['foo'] } },
+    })
+    const get = vi.spyOn(compiled.languages, 'get')
+
+    expect(needsVueTsxDetection(compiled, false)).toBe(true)
+    const lightReads = get.mock.calls.length
+    expect(needsVueTsxDetection(compiled, false)).toBe(true)
+    expect(get).toHaveBeenCalledTimes(lightReads)
+
+    expect(needsVueTsxDetection(compiled, true)).toBe(false)
+    const darkReads = get.mock.calls.length
+    expect(needsVueTsxDetection(compiled, true)).toBe(false)
+    expect(get).toHaveBeenCalledTimes(darkReads)
+  })
+})
+
+describe('scan session state', () => {
+  it('clears partial candidates before advancing a skipped rule', () => {
+    const session = {
+      candidateKeys: new Set(['old']),
+      candidateSnapshot: new Map([['old', [{ end: 1, start: 0 }]]]),
+      currentRuleMatchCount: 7,
+      nextSliceIndex: 2,
+    }
+    resetCurrentRuleState(session)
+    expect(session.candidateKeys.size).toBe(0)
+    expect(session.candidateSnapshot.size).toBe(0)
+    expect(session.currentRuleMatchCount).toBe(0)
+    expect(session.nextSliceIndex).toBe(0)
+  })
+})
+
+describe('scan boundaries', () => {
+  it('uses complete URI and document instance identity for worker text keys', () => {
+    const createDocument = (query: string) => ({
+      uri: { authority: '', fragment: '', path: '/same/file.ts', query, scheme: 'git' },
+    }) as any
+    const first = createDocument('ref=HEAD')
+    const revision = createDocument('ref=parent')
+    const reopened = createDocument('ref=HEAD')
+    expect(getDocumentCacheIdentity(first)).toBe(getDocumentCacheIdentity(first))
+    expect(getDocumentCacheIdentity(first)).not.toBe(getDocumentCacheIdentity(revision))
+    expect(getDocumentCacheIdentity(first)).not.toBe(getDocumentCacheIdentity(reopened))
+  })
+
+  it('extends scan context without splitting UTF-16 surrogate pairs', () => {
+    const text = 'a😀b'
+    const document = {
+      getText: (range: { end: number, start: number }) => text.slice(range.start, range.end),
+      positionAt: (offset: number) => offset,
+    } as any
+    expect(nextCodePointOffset(document, 0, text.length)).toBe(1)
+    expect(nextCodePointOffset(document, 1, text.length)).toBe(3)
+    expect(previousCodePointOffset(document, 3)).toBe(1)
+    expect(previousCodePointOffset(document, text.length)).toBe(3)
+  })
+})
+
+describe('regex execution', () => {
+  it('advances Unicode zero-width matches by code point', async () => {
+    const synchronous = safeMatchAll('😀a', /(?=.)/dgu)
+    expect(synchronous.map(match => match.index)).toEqual([0, 2])
+
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(?=(.))', flags: 'gdu' },
+      targetGroups: [1],
+      text: '😀a',
+    })).resolves.toEqual([{ spans: [[0, 2]] }, { spans: [[2, 3]] }])
+    executor.dispose()
+  })
+
+  it('skips a zero-width full match without capture groups', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(?=.)', flags: 'gdu' },
+      targetGroups: [undefined],
+      text: '😀a',
+    })).resolves.toEqual([])
+    executor.dispose()
+  })
+
+  it('preserves sticky matching semantics', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: compilePattern(['foo', 'y']),
+      targetGroups: [0],
+      text: 'xfoo',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: compilePattern(['foo', 'y']),
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([{ spans: [[0, 3]] }])
+    executor.dispose()
+  })
+
+  it('preserves document anchor semantics when slices include boundary context', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '^foo', flags: 'gd' },
+      targetGroups: [0],
+      text: '\nfooX',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'foo$', flags: 'gd' },
+      targetGroups: [0],
+      text: 'Xfoo\nX',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '^foo', flags: 'gmd' },
+      targetGroups: [0],
+      text: '\nfooX',
+    })).resolves.toEqual([{ spans: [[1, 4]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'foo$', flags: 'gmd' },
+      targetGroups: [0],
+      text: 'Xfoo\nX',
+    })).resolves.toEqual([{ spans: [[1, 4]] }])
+    executor.dispose()
+  })
+
+  it('preserves legacy default capture behavior for absent and empty groups', async () => {
+    const executor = new RegexExecutor(500)
+    for (const source of ['(foo)?bar', '()bar', '()(bar)']) {
+      await expect(executor.execute({
+        ignores: [],
+        maxMatches: 10,
+        pattern: { source, flags: 'gd' },
+        targetGroups: [undefined],
+        text: 'bar',
+      })).resolves.toEqual([])
+    }
+    executor.dispose()
+  })
+
+  it('rejects a target whose full match touches an artificial slice boundary', async () => {
+    const executor = new RegexExecutor(500)
+    const rule = {
+      context: 'test',
+      id: 'test',
+      layerContextId: 'test',
+      ignores: [],
+      pattern: { source: '^[\\s\\S]*?(foo)', flags: 'gd' },
+      targets: [{ groupIndex: 1, styleId: 'red' }],
+    }
+    await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[1, 4]],
+      artificialEnd: true,
+      artificialStart: true,
+      scanStart: 0,
+      text: '\nfooX',
+      textKey: 'boundary',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ acceptedMatchCount: 0, ranges: [] })
+    executor.dispose()
+  })
+
+  it('keeps ordinary matches protected by artificial boundary guards', async () => {
+    const executor = new RegexExecutor(500)
+    const rule = {
+      context: 'test',
+      id: 'test',
+      layerContextId: 'test',
+      ignores: [],
+      pattern: { source: 'foo', flags: 'gd' },
+      targets: [{ groupIndex: 0, styleId: 'red' }],
+    }
+    await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[1, 4]],
+      artificialEnd: true,
+      artificialStart: true,
+      scanStart: 0,
+      text: 'XfooX',
+      textKey: 'left-guard',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ ranges: [{ start: 1, end: 4 }] })
+    await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[0, 3]],
+      artificialEnd: true,
+      artificialStart: false,
+      scanStart: 0,
+      text: 'fooX',
+      textKey: 'right-guard',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({ ranges: [{ start: 0, end: 3 }] })
+    executor.dispose()
+  })
+
+  it('rejects artificial-boundary matches before match-budget accounting', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      acceptedIntervals: [[0, 17]],
+      artificialStart: true,
+      ignores: [],
+      maxMatches: 1,
+      pattern: { source: '^foo.*(TARGET)|(TARGET)', flags: 'gd' },
+      targetGroups: [1, 2],
+      text: 'foo filler TARGET',
+      textKey: 'boundary-budget',
+    })).resolves.toEqual([{ spans: [undefined, [11, 17]] }])
+    executor.dispose()
+  })
+
+  it('does not let artificial anchors consume visible alternatives or ignores', async () => {
+    const executor = new RegexExecutor(500)
+    const text = 'Xfoo filler TARGETY'
+    const request = {
+      acceptedIntervals: [[1, text.length - 1]] as Array<[number, number]>,
+      artificialEnd: true,
+      artificialStart: true,
+      maxMatches: 10,
+      targetGroups: [1],
+      text,
+      textKey: 'guarded-anchors',
+    }
+    await expect(executor.execute({
+      ...request,
+      ignores: [],
+      pattern: { source: '^foo[\s\S]*?(TARGET)|(TARGET)', flags: 'gd' },
+      targetGroups: [1, 2],
+    })).resolves.toEqual([{ spans: [undefined, [12, 18]] }])
+    await expect(executor.execute({
+      ...request,
+      ignores: [{ source: '^foo[\s\S]*?TARGET', flags: 'gd' }],
+      pattern: { source: '(TARGET)', flags: 'gd' },
+    })).resolves.toEqual([{ spans: [[12, 18]] }])
+    executor.dispose()
+  })
+
+  it('counts regex matches separately from generated capture ranges', async () => {
+    const executor = new RegexExecutor(500)
+    const rule = {
+      context: 'test',
+      id: 'test',
+      layerContextId: 'test',
+      ignores: [],
+      pattern: { source: '(a)(b)', flags: 'gd' },
+      targets: [{ groupIndex: 1, styleId: 'red' }, { groupIndex: 2, styleId: 'blue' }],
+    }
+    await expect(scanRule(executor, rule, {
+      acceptedIntervals: [[0, 2]],
+      artificialEnd: false,
+      artificialStart: false,
+      scanStart: 0,
+      text: 'ab',
+      textKey: 'captures',
+    }, new AbortController().signal, 10, 0, 10, false)).resolves.toMatchObject({
+      acceptedMatchCount: 1,
+      ranges: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
+    })
+    executor.dispose()
+  })
+
+  it('uses engine-provided indices for captures and local ignores', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(a)(a)', flags: 'gd' },
+      targetGroups: [1, 2],
+      text: 'aa',
+    })).resolves.toEqual([{ spans: [[0, 1], [1, 2]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(a)?(b)', flags: 'gd' },
+      targetGroups: [1, 2],
+      text: 'b',
+    })).resolves.toEqual([{ spans: [undefined, [0, 1]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(?<=foo)(bar)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foobar',
+    })).resolves.toEqual([{ spans: [[3, 6]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(?<name>foo)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foo',
+    })).resolves.toEqual([{ spans: [[0, 3]] }])
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(😀)(foo)', flags: 'gdu' },
+      targetGroups: [1, 2],
+      text: '😀foo',
+    })).resolves.toEqual([{ spans: [[0, 2], [2, 5]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo(bar)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'bar', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foobar',
+    })).resolves.toEqual([{ spans: [[3, 6]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'abc', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '\\s+', flags: 'gd' },
+      targetGroups: [0],
+      text: 'abc',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo\\n', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '^bar', flags: 'gmd' },
+      targetGroups: [0],
+      text: 'foo\nbar',
+    })).resolves.toEqual([{ spans: [[4, 7]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'SECRET', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo.*bar', flags: 'gd' },
+      targetGroups: [0],
+      text: 'fooSECRETbar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?<=(foo))bar', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?=(foo))', flags: 'gd' },
+      targetGroups: [1],
+      text: 'foo',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?<=foo)bar', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'bar', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo(?=bar)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foobar',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?=foo)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?<=\\s{3})BAR', flags: 'gd' },
+      targetGroups: [0],
+      text: 'fooBAR',
+    })).resolves.toEqual([])
+    await expect(executor.execute({
+      ignores: [{ source: 'foo', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?=\\s)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'foo',
+    })).resolves.toEqual([])
+    executor.dispose()
+  })
+
+  it.each([
+    [999, false],
+    [1_000, false],
+    [1_001, true],
+  ])('rejects ignore patterns only after exceeding the match limit (%i matches)', async (matchCount, exceedsLimit) => {
+    const executor = new RegexExecutor(500)
+    const result = executor.execute({
+      ignores: [{ source: 'x', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${'x'.repeat(matchCount)}TARGET`,
+    })
+    if (exceedsLimit)
+      await expect(result).rejects.toThrow('Ignore pattern exceeded 1000 matches')
+    else
+      await expect(result).resolves.toEqual([{ spans: [[matchCount, matchCount + 6]] }])
+    executor.dispose()
+  })
+
+  it.each(['\\u2028', '\\u2029'])('preserves JavaScript line terminator %s while masking ignored text', async (separatorSource) => {
+    const executor = new RegexExecutor(500)
+    const separator = separatorSource === '\\u2028' ? '\u2028' : '\u2029'
+    await expect(executor.execute({
+      ignores: [{ source: `IGNORE${separatorSource}`, flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '^TARGET', flags: 'gmd' },
+      targetGroups: [0],
+      text: `IGNORE${separator}TARGET`,
+    })).resolves.toEqual([{ spans: [[7, 13]] }])
+    executor.dispose()
+  })
+
+  it.each([
+    { pattern: 'foo', span: [0, 3], text: 'foo' },
+    { pattern: 'xfoo', span: [0, 4], text: 'xfoo' },
+  ])('ignores zero-width ignore matches consistently in $text', async ({ pattern, span, text }) => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: '(?=foo)', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: pattern, flags: 'gd' },
+      targetGroups: [0],
+      text,
+    })).resolves.toEqual([{ spans: [span] }])
+    executor.dispose()
+  })
+
+  it('enforces a shared ignore interval budget', async () => {
+    const executor = new RegexExecutor(500)
+    const characters = 'abcdefghijk'.split('')
+    await expect(executor.execute({
+      ignores: characters.map(source => ({ source, flags: 'gd' })),
+      maxMatches: 1_000,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${characters.map(character => character.repeat(999)).join('')}TARGET`,
+    })).rejects.toThrow('Ignore patterns exceeded 10000 total intervals')
+    executor.dispose()
+  })
+
+  it('uses ignore masking to isolate catastrophic main-pattern input', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'a+b', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(a+)+$|TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${'a'.repeat(30)}b TARGET`,
+    })).resolves.toEqual([{ spans: [[32, 38]] }])
+    executor.dispose()
+  })
+
+  it('restarts after an ignored masked prefix to find a later legal match', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'x', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '\\s*(b)', flags: 'gd' },
+      targetGroups: [1],
+      text: 'x b',
+    })).resolves.toEqual([{ spans: [[2, 3]] }])
+    executor.dispose()
+  })
+
+  it('advances from a masked false candidate to find an internal legal alternative', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'XXX', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'foo(?=\\s{3}bar)|oo', flags: 'gd' },
+      targetGroups: [0],
+      text: 'fooXXXbar',
+    })).resolves.toEqual([{ spans: [[1, 3]] }])
+    executor.dispose()
+  })
+
+  it('preserves lookbehind context while probing before an ignored interval', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'IGNORE', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'a.*TARGET|(?<=aa x)b', flags: 'gd' },
+      targetGroups: [0],
+      text: 'aa xbIGNORE TARGET',
+    })).resolves.toEqual([{ spans: [[4, 5]] }])
+    await expect(executor.execute({
+      ignores: [{ source: 'IGNORE', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '.*$', flags: 'gd' },
+      targetGroups: [0],
+      text: 'aIGNORE',
+    })).resolves.toEqual([])
+    executor.dispose()
+  })
+
+  it('jumps across a long ignored prefix without exhausting raw candidates', async () => {
+    const executor = new RegexExecutor(500)
+    const prefix = 'a'.repeat(10_001)
+    await expect(executor.execute({
+      ignores: [{ source: 'IGNORE', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '.*TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${prefix}IGNORE TARGET`,
+    })).resolves.toEqual([{ spans: [[prefix.length + 6, prefix.length + 13]] }])
+    executor.dispose()
+  })
+
+  it('uses the original sticky match when masking changes a greedy candidate', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [{ source: 'X', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: 'a.*(?= )', flags: 'gd' },
+      targetGroups: [0],
+      text: 'a aa X',
+    })).resolves.toEqual([{ spans: [[0, 4]] }])
+    executor.dispose()
+  })
+
+  it('does not charge ignored raw matches to the accepted match limit', async () => {
+    const executor = new RegexExecutor(500)
+    const ignored = `BEGIN${'x'.repeat(2_000)}END`
+    await expect(executor.execute({
+      ignores: [{ source: 'BEGIN[\\s\\S]*END', flags: 'gd' }],
+      maxMatches: 10,
+      pattern: { source: '(?= )|TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: `${ignored}TARGET`,
+    })).resolves.toEqual([{ spans: [[ignored.length, ignored.length + 6]] }])
+    executor.dispose()
+  })
+
+  it('returns the first accepted matches and marks excess output as truncated', async () => {
+    const executor = new RegexExecutor(500)
+    const results = await executor.execute({
+      ignores: [],
+      maxMatches: 3,
+      pattern: { source: '.', flags: 'gd' },
+      targetGroups: [0],
+      text: 'abcd',
+    })
+    expect(results).toEqual([
+      { spans: [[0, 1]] },
+      { spans: [[1, 2]] },
+      { spans: [[2, 3]] },
+    ])
+    expect(results.truncated).toBe(true)
+    executor.dispose()
+  })
+
+  it('truncates the accepted match limit across slices', async () => {
+    const executor = new RegexExecutor(500)
+    const results = await executor.execute({
+      acceptedMatchOffset: 9,
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'x', flags: 'gd' },
+      targetGroups: [0],
+      text: 'xx',
+    })
+    expect(results).toEqual([{ spans: [[0, 1]] }])
+    expect(results.truncated).toBe(true)
+    executor.dispose()
+  })
+
+  it('enforces the span budget inside the worker', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      maxSpans: 1,
+      pattern: { source: '(x)(x)', flags: 'gd' },
+      targetGroups: [1, 2],
+      text: 'xx',
+    })).rejects.toThrow('Rule output exceeded the remaining 1 span budget')
+    executor.dispose()
+  })
+
+  it('returns a deterministic partial main-pattern result set', async () => {
+    const executor = new RegexExecutor(500)
+    const results = await executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'x', flags: 'gd' },
+      targetGroups: [0],
+      text: 'x'.repeat(11),
+    })
+    expect(results).toHaveLength(10)
+    expect(results[0]).toEqual({ spans: [[0, 1]] })
+    expect(results[9]).toEqual({ spans: [[9, 10]] })
+    expect(results.truncated).toBe(true)
+    executor.dispose()
+  })
+
+  it('preserves the first participating capture by default', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(foo)?(bar)', flags: 'gd' },
+      targetGroups: [undefined],
+      text: 'bar',
+    })).resolves.toEqual([{ spans: [[0, 3]] }])
+    executor.dispose()
+  })
+
+  it('terminates catastrophic work and recovers', async () => {
+    const executor = new RegexExecutor(250)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: '(a+)+$', flags: 'gd' },
+      targetGroups: [0],
+      text: `${'a'.repeat(20_000)}b`,
+    })).rejects.toThrow(/exceeded 250ms/)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'a+', flags: 'gd' },
+      targetGroups: [0],
+      text: 'baaa',
+    })).resolves.toEqual([{ spans: [[1, 4]] }])
+    executor.dispose()
+  })
+
+  it('prioritizes accepted intervals over dense context matches', async () => {
+    const executor = new RegexExecutor(500)
+    const text = `${'x'.repeat(2_000)}TARGET`
+    const results = await executor.execute({
+      acceptedIntervals: [[2_000, text.length]],
+      ignores: [],
+      maxMatches: 1_000,
+      pattern: { source: 'x|TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text,
+      textKey: 'visible-priority',
+    })
+    expect(results).toEqual([{ spans: [[2_000, text.length]] }])
+    expect(results.truncated).toBeUndefined()
+    executor.dispose()
+  })
+
+  it('enforces an independent raw iteration limit for skipped candidates', async () => {
+    const executor = new RegexExecutor(500)
+    await expect(executor.execute({
+      acceptedIntervals: [],
+      ignores: [],
+      maxMatches: 1_000,
+      pattern: { source: '(?=x)', flags: 'gd' },
+      targetGroups: [0],
+      text: 'x'.repeat(250_001),
+      textKey: 'raw-limit',
+    })).rejects.toThrow('exceeded 250000 raw iterations')
+    executor.dispose()
+  })
+
+  it('keeps oversized ignore masks functional without retaining them beyond the unified cache budget', async () => {
+    const executor = new RegexExecutor(2_000)
+    const text = `TARGET${'x'.repeat(1_050_000)}`
+    const request = {
+      ignores: Array.from({ length: 100 }, () => ({ source: 'x(?=y)', flags: 'gd' })),
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text,
+      textKey: 'unified-cache-budget',
+    }
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 6]] }])
+    await expect(executor.execute(request, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 50 })).rejects.toThrow('remaining 50ms scan budget')
+    executor.dispose()
+  })
+
+  it('charges ignore cache keys to the unified byte budget', async () => {
+    const executor = new RegexExecutor(2_000)
+    const retainedText = `TARGET${'x'.repeat(500_000)}`
+    const retainedRequest = {
+      ignores: Array.from({ length: 100 }, () => ({ source: 'x(?=y)', flags: 'gd' })),
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: retainedText,
+      textKey: 'key-budget-retained',
+    }
+    await expect(executor.execute(retainedRequest)).resolves.toEqual([{ spans: [[0, 6]] }])
+
+    for (let variant = 0; variant < 11; variant++) {
+      await expect(executor.execute({
+        ignores: Array.from({ length: 100 }, (_, index) => ({
+          source: `${variant}-${index}-${'q'.repeat(980)}`,
+          flags: 'gd',
+        })),
+        maxMatches: 10,
+        pattern: { source: 'TARGET', flags: 'gd' },
+        targetGroups: [0],
+        text: 'TARGET',
+        textKey: 'large-key-variants',
+      })).resolves.toEqual([{ spans: [[0, 6]] }])
+    }
+
+    await expect(executor.execute(retainedRequest, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 50 })).rejects.toThrow('remaining 50ms scan budget')
+    executor.dispose()
+  })
+
+  it('applies the ignore variant cap without evicting another text cache', async () => {
+    const executor = new RegexExecutor(2_000)
+    const retainedText = `TARGET${'x'.repeat(500_000)}`
+    const retainedRequest = {
+      ignores: Array.from({ length: 100 }, (_, index) => ({ source: `missing-${index}`, flags: 'gd' })),
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: retainedText,
+      textKey: 'retained-text',
+    }
+    await expect(executor.execute(retainedRequest)).resolves.toEqual([{ spans: [[0, 6]] }])
+
+    for (let variant = 0; variant <= 100; variant++) {
+      await expect(executor.execute({
+        ignores: [{ source: `missing-variant-${variant}`, flags: 'gd' }],
+        maxMatches: 10,
+        pattern: { source: 'TARGET', flags: 'gd' },
+        targetGroups: [0],
+        text: 'TARGET',
+        textKey: 'variant-text',
+      })).resolves.toEqual([{ spans: [[0, 6]] }])
+    }
+
+    await expect(executor.execute(retainedRequest, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 10 })).resolves.toEqual([{ spans: [[0, 6]] }])
+    executor.dispose()
+  })
+
+  it('does not resend cached text when slice keys alternate', async () => {
+    const messages: any[] = []
+    class FakeWorker extends EventEmitter {
+      postMessage(message: any) {
+        messages.push(message)
+        queueMicrotask(() => this.emit('message', { id: message.id, results: [] }))
+      }
+
+      terminate = vi.fn(async () => 0)
+      unref = vi.fn()
+    }
+    const executor = new RegexExecutor(500, () => new FakeWorker() as any)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0] }
+    await executor.execute({ ...request, text: 'text-a', textKey: 'a' })
+    await executor.execute({ ...request, text: 'text-b', textKey: 'b' })
+    await executor.execute({ ...request, text: 'text-a', textKey: 'a' })
+    await executor.execute({ ...request, text: 'text-b', textKey: 'b' })
+    expect(messages.map(message => message.request.text)).toEqual(['text-a', 'text-b', undefined, undefined])
+    executor.dispose()
+  })
+
+  it('sends unchanged slice text to a worker only once', async () => {
+    const messages: any[] = []
+    class FakeWorker extends EventEmitter {
+      postMessage(message: any) {
+        messages.push(message)
+        queueMicrotask(() => this.emit('message', { id: message.id, results: [] }))
+      }
+
+      terminate = vi.fn(async () => 0)
+      unref = vi.fn()
+    }
+    const executor = new RegexExecutor(500, () => new FakeWorker() as any)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'same text' }
+    await executor.execute(request)
+    await executor.execute(request)
+    await executor.execute({ ...request, text: 'different text' })
+    executor.resetCache()
+    await executor.execute({ ...request, text: 'different text' })
+    const requests = messages.filter(message => message.request)
+    expect(requests[0].request.text).toBe('same text')
+    expect(requests[1].request).not.toHaveProperty('text')
+    expect(requests[2].request.text).toBe('different text')
+    expect(messages).toContainEqual({ reset: { cacheGeneration: requests[2].request.cacheGeneration + 1 } })
+    expect(requests[3].request.text).toBe('different text')
+    expect(requests[3].request.cacheGeneration).toBe(requests[2].request.cacheGeneration + 1)
+    executor.dispose()
+  })
+
+  it('recovers after a synchronous worker factory failure cooldown', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let attempts = 0
+    const executor = new RegexExecutor(500, () => {
+      attempts++
+      if (attempts === 1)
+        throw new Error('ERR_WORKER_INIT_FAILED')
+      return createRegexWorker()
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request)).rejects.toThrow('ERR_WORKER_INIT_FAILED')
+    await expect(executor.execute(request)).rejects.toThrow('temporarily unavailable')
+    expect(attempts).toBe(1)
+    now = 5_001
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
+  it('does not charge delayed worker startup to the regex timeout', async () => {
+    vi.useFakeTimers()
+    const worker = new EventEmitter() as any
+    let id = 0
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.terminate = vi.fn(async () => 0)
+    worker.postMessage = vi.fn((message: { id: number }) => id = message.id)
+    const executor = new RegexExecutor(10, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    const result = executor.execute(request)
+    await vi.advanceTimersByTimeAsync(800)
+    worker.emit('message', { id, started: true })
+    worker.emit('message', { finished: true, id })
+    worker.emit('message', { id, results: [{ spans: [[0, 1]] }] })
+    await expect(result).resolves.toEqual([{ spans: [[0, 1]] }])
+    executor.dispose()
+    vi.useRealTimers()
+  })
+
+  it('reports active execution time without charging queued wait time', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const worker = new EventEmitter() as any
+    const ids: number[] = []
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.terminate = vi.fn(async () => 0)
+    worker.postMessage = vi.fn(({ id }: { id: number }) => ids.push(id))
+    const executor = new RegexExecutor(10_000, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    let firstDuration = -1
+    let secondDuration = -1
+    const first = executor.execute(request, undefined, duration => firstDuration = duration)
+    const second = executor.execute(request, undefined, duration => secondDuration = duration)
+    expect(ids).toHaveLength(1)
+    worker.emit('message', { id: ids[0], started: true })
+    now = 4_000
+    worker.emit('message', { finished: true, id: ids[0] })
+    worker.emit('message', { id: ids[0], results: [{ spans: [[0, 1]] }] })
+    await first
+    expect(ids).toHaveLength(2)
+    worker.emit('message', { id: ids[1], started: true })
+    now = 4_001
+    worker.emit('message', { finished: true, id: ids[1] })
+    worker.emit('message', { id: ids[1], results: [{ spans: [[0, 1]] }] })
+    await second
+    expect(firstDuration).toBe(4_000)
+    expect(secondDuration).toBe(1)
+    executor.dispose()
+  })
+
+  it('settles and drains when an execution callback throws', async () => {
+    const worker = new EventEmitter() as any
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.terminate = vi.fn(async () => 0)
+    worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, results: [{ spans: [[0, 1]] }] })))
+    const executor = new RegexExecutor(500, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    const first = executor.execute(request, undefined, () => {
+      throw new Error('metrics failed')
+    })
+    const second = executor.execute(request)
+    await expect(first).resolves.toEqual([{ spans: [[0, 1]] }])
+    await expect(second).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
+  it('uses an explicit deadline kind when the scan budget equals the regex timeout', async () => {
+    const worker = new EventEmitter() as any
+    worker.off = worker.removeListener.bind(worker)
+    worker.unref = vi.fn()
+    worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, started: true })))
+    worker.terminate = vi.fn(async () => 0)
+    const executor = new RegexExecutor(10, () => worker)
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request, undefined, undefined, { deadlineKind: 'scan-budget', timeoutMs: 10 })).rejects.toSatisfy(isRegexExecutionBudgetError)
+    expect(worker.terminate).toHaveBeenCalledTimes(1)
+    executor.dispose()
+  })
+
+  it('waits for worker termination before starting the next job', async () => {
+    let releaseTermination!: () => void
+    let attempts = 0
+    const executor = new RegexExecutor(10, () => {
+      attempts++
+      if (attempts > 1) {
+        const recovered = new EventEmitter() as any
+        recovered.off = recovered.removeListener.bind(recovered)
+        recovered.unref = vi.fn()
+        recovered.terminate = vi.fn(async () => 0)
+        recovered.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => recovered.emit('message', { id, results: [{ spans: [[0, 1]] }] })))
+        return recovered
+      }
+      const worker = new EventEmitter() as any
+      worker.off = worker.removeListener.bind(worker)
+      worker.unref = vi.fn()
+      worker.postMessage = vi.fn(({ id }: { id: number }) => queueMicrotask(() => worker.emit('message', { id, started: true })))
+      worker.terminate = vi.fn(() => new Promise<number>((resolve) => {
+        releaseTermination = () => resolve(0)
+      }))
+      return worker
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request)).rejects.toThrow('exceeded 10ms')
+    const next = executor.execute(request)
+    await Promise.resolve()
+    expect(attempts).toBe(1)
+    releaseTermination()
+    await expect(next).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(attempts).toBe(2)
+    executor.dispose()
+  })
+
+  it('rejects queued jobs without recreating workers during infrastructure cooldown', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let attempts = 0
+    const executor = new RegexExecutor(500, () => {
+      attempts++
+      if (attempts > 1)
+        return createRegexWorker()
+      const worker = new EventEmitter() as any
+      worker.off = worker.removeListener.bind(worker)
+      worker.unref = vi.fn()
+      worker.terminate = vi.fn(async () => 0)
+      worker.postMessage = vi.fn(() => queueMicrotask(() => worker.emit('error', new Error('worker unavailable'))))
+      return worker
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    const first = executor.execute(request)
+    const second = executor.execute(request)
+    const third = executor.execute(request)
+    await expect(first).rejects.toThrow('worker unavailable')
+    await expect(second).rejects.toThrow('temporarily unavailable')
+    await expect(third).rejects.toThrow('temporarily unavailable')
+    expect(attempts).toBe(1)
+    now = 5_001
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(attempts).toBe(2)
+    executor.dispose()
+  })
+
+  it('recovers after a synchronous postMessage failure cooldown', async () => {
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let attempts = 0
+    const executor = new RegexExecutor(500, () => {
+      attempts++
+      if (attempts > 1)
+        return createRegexWorker()
+      return {
+        off: vi.fn(),
+        on: vi.fn(),
+        once: vi.fn(),
+        postMessage: () => { throw new Error('postMessage failed') },
+        terminate: vi.fn(async () => 0),
+        unref: vi.fn(),
+      } as any
+    })
+    const request = { ignores: [], maxMatches: 10, pattern: { source: 'a', flags: 'gd' }, targetGroups: [0], text: 'a' }
+    await expect(executor.execute(request)).rejects.toThrow('postMessage failed')
+    await expect(executor.execute(request)).rejects.toThrow('temporarily unavailable')
+    expect(attempts).toBe(1)
+    now = 5_001
+    await expect(executor.execute(request)).resolves.toEqual([{ spans: [[0, 1]] }])
+    expect(executor.pendingCount).toBe(0)
+    executor.dispose()
+  })
+
+  it('removes cancelled queued work and aborts active work', async () => {
+    const executor = new RegexExecutor(1_000)
+    const slow = { ignores: [], maxMatches: 10, pattern: { source: '(a+)+$', flags: 'gd' }, targetGroups: [0], text: `${'a'.repeat(20_000)}b` }
+    const activeController = new AbortController()
+    const queuedController = new AbortController()
+    const active = executor.execute(slow, activeController.signal)
+    const queued = executor.execute({ ...slow, text: 'queued' }, queuedController.signal)
+    expect(executor.pendingCount).toBe(2)
+    queuedController.abort()
+    await expect(queued).rejects.toSatisfy(isRegexExecutionAbortedError)
+    expect(executor.pendingCount).toBe(1)
+    activeController.abort()
+    await expect(active).rejects.toSatisfy(isRegexExecutionAbortedError)
+    expect(executor.pendingCount).toBe(0)
+    await expect(executor.execute({
+      ignores: [],
+      maxMatches: 10,
+      pattern: { source: 'TARGET', flags: 'gd' },
+      targetGroups: [0],
+      text: 'TARGET',
+    })).resolves.toEqual([{ spans: [[0, 6]] }])
+    executor.dispose()
+  })
+})
+
+describe('runtime controls', () => {
+  it('enforces the range limit after old and new rule snapshots are combined', () => {
+    const oldSnapshot = new Map([['red', Array.from({ length: 6 }, (_, index) => index)]])
+    const newSnapshot = new Map([['blue', Array.from({ length: 5 }, (_, index) => index)]])
+    expect(aggregateSnapshots([oldSnapshot, newSnapshot], 10)).toBeUndefined()
+    expect(aggregateSnapshots([oldSnapshot, newSnapshot], 11)).toEqual(new Map([
+      ['red', [0, 1, 2, 3, 4, 5]],
+      ['blue', [0, 1, 2, 3, 4]],
+    ]))
+  })
+
+  it('deduplicates equal values while aggregating snapshots', () => {
+    const first = new Map([['red', [{ start: 1, end: 2 }]]])
+    const second = new Map([['red', [{ start: 1, end: 2 }]]])
+    expect(aggregateSnapshots([first, second], 10, (_style, value) => `${value.start}:${value.end}`)?.get('red')).toHaveLength(1)
+  })
+
+  it('bounds remembered warning keys', () => {
+    const values = new BoundedSet<string>(2)
+    expect(values.add('first')).toBe(true)
+    expect(values.add('first')).toBe(false)
+    values.add('second')
+    values.add('third')
+    expect(values.size).toBe(2)
+    expect(values.add('first')).toBe(true)
+  })
+
+  it('isolates input cooldowns and bounds retries with a rolling circuit breaker', () => {
+    let now = 0
+    const registry = new RuleFailureRegistry<object>(1_000, () => now, 3, 1_000)
+    const documentA = {}
+    const documentB = {}
+
+    expect(registry.recordFailure(documentA, 'rule', 'input-1')).toEqual({ disabled: true, retryAfterMs: 1_000 })
+    expect(registry.getStatus(documentA, 'rule', 'input-1')).toEqual({ disabled: true, retryAfterMs: 1_000 })
+    expect(registry.getStatus(documentA, 'rule', 'input-2')).toEqual({ disabled: false, retryAfterMs: 0 })
+    expect(registry.getStatus(documentB, 'rule', 'input-1')).toEqual({ disabled: false, retryAfterMs: 0 })
+
+    now = 100
+    registry.recordFailure(documentA, 'rule', 'input-2')
+    expect(registry.getStatus(documentA, 'rule', 'input-1')).toEqual({ disabled: true, retryAfterMs: 900 })
+    expect(registry.getStatus(documentA, 'rule', 'input-2')).toEqual({ disabled: true, retryAfterMs: 1_000 })
+    now = 200
+    registry.recordFailure(documentA, 'rule', 'input-3')
+    expect(registry.getStatus(documentA, 'rule', 'input-4')).toEqual({ disabled: true, retryAfterMs: 800 })
+    expect(registry.getStatus(documentA, 'other-rule', 'input-4')).toEqual({ disabled: false, retryAfterMs: 0 })
+
+    now = 1_001
+    expect(registry.getStatus(documentA, 'rule', 'input-4')).toEqual({ disabled: false, retryAfterMs: 0 })
+    expect(registry.getStatus(documentA, 'rule', 'input-3')).toEqual({ disabled: true, retryAfterMs: 199 })
+    now = 1_201
+    expect(registry.getStatus(documentA, 'rule', 'input-3')).toEqual({ disabled: false, retryAfterMs: 0 })
+  })
+
+  it('bounds retained input cooldowns independently per rule', () => {
+    let now = 0
+    const registry = new RuleFailureRegistry<object>(1_000, () => now, 100, 1_000, 2)
+    const document = {}
+
+    registry.recordFailure(document, 'rule', 'input-1')
+    now = 1
+    registry.recordFailure(document, 'rule', 'input-2')
+    now = 2
+    registry.recordFailure(document, 'rule', 'input-3')
+
+    expect(registry.getStatus(document, 'rule', 'input-1').disabled).toBe(false)
+    expect(registry.getStatus(document, 'rule', 'input-2').disabled).toBe(true)
+    expect(registry.getStatus(document, 'rule', 'input-3').disabled).toBe(true)
+  })
+
+  it('enforces strict range and duration budgets', () => {
+    let now = 0
+    const ranges = new RefreshBudget(2, 1_000, () => now)
+    expect(ranges.consumeRange()).toBe(true)
+    expect(ranges.consumeRange()).toBe(true)
+    expect(ranges.consumeRange()).toBe(false)
+
+    const time = new RefreshBudget(10, 1_000, () => now)
+    now = 1_000
+    expect(time.exhausted).toBe(true)
+  })
+})
+
+describe('latest task scheduler', () => {
+  it('keeps one active task, invalidates immediately, and removes stale keys', async () => {
+    vi.useFakeTimers()
+    const releases: Array<() => void> = []
+    const applied: number[] = []
+    let active = 0
+    let maximumActive = 0
+    const scheduler = new LatestTaskScheduler<string>(async (_key, task) => {
+      active++
+      maximumActive = Math.max(maximumActive, active)
+      await new Promise<void>(resolve => releases.push(resolve))
+      if (task.isCurrent())
+        applied.push(task.generation)
+      active--
+    }, 100)
+
+    scheduler.schedule('editor', true)
+    await Promise.resolve()
+    expect(releases).toHaveLength(1)
+    for (let index = 0; index < 100; index++)
+      scheduler.schedule('editor')
+    expect(scheduler.size).toBe(1)
+    expect(maximumActive).toBe(1)
+    releases.shift()!()
+    await Promise.resolve()
+    await vi.runAllTimersAsync()
+    await Promise.resolve()
+    expect(releases).toHaveLength(1)
+    releases.shift()!()
+    await Promise.resolve()
+    expect(applied).toHaveLength(1)
+    expect(maximumActive).toBe(1)
+
+    scheduler.remove('editor')
+    expect(scheduler.size).toBe(0)
+    scheduler.dispose()
+    vi.useRealTimers()
+  })
+})
+
+describe('scheduler lifecycle', () => {
+  it('releases one thousand removed editor states', () => {
+    vi.useFakeTimers()
+    const scheduler = new LatestTaskScheduler<object>(async () => {}, 100)
+    const editors = Array.from({ length: 1_000 }, () => ({}))
+    editors.forEach(editor => scheduler.schedule(editor))
+    expect(scheduler.size).toBe(1_000)
+    editors.forEach(editor => scheduler.remove(editor))
+    expect(scheduler.size).toBe(0)
+    scheduler.dispose()
+    vi.useRealTimers()
+  })
+
+  it('prevents an asynchronous tail from applying after dispose', async () => {
+    let release!: () => void
+    const manager = new DecorationManager(new Map([['a', { color: 'red' }]]))
+    manager.prepareProfile('test', ['a'])
+    const editor = new MockEditor() as any
+    const scheduler = new LatestTaskScheduler<object>(async (_key, task) => {
+      await new Promise<void>(resolve => release = resolve)
+      if (task.isCurrent())
+        manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'test', ['a'])
+    }, 0)
+    scheduler.schedule({}, true)
+    await Promise.resolve()
+    scheduler.dispose()
+    manager.dispose()
+    release()
+    await Promise.resolve()
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    expect(editor.setDecorations).not.toHaveBeenCalled()
+  })
+})
+
+describe('configuration transactions', () => {
+  it('retries a budget-blocked configuration after visible profiles are released', async () => {
+    const languages = Array.from({ length: 6 }, (_, index) => `pending-${index}`)
+    let rules: object = Object.fromEntries(languages.map(language => [
+      language,
+      { light: { red: ['pattern-0'] } },
+    ]))
+    vi.mocked(getConfiguration).mockImplementation((name: string, defaultValue: unknown) => name.endsWith('.rules')
+      ? rules
+      : name.endsWith('.exclude')
+        ? []
+        : defaultValue)
+    const editors = languages.map(createActivationEditor)
+    window.visibleTextEditors = editors as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const previousTypes = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    const light = Object.fromEntries(Array.from({ length: 300 }, (_, index) => [
+      `rgb(${index % 256},${Math.floor(index / 256)},0)`,
+      [`pattern-${index}`],
+    ]))
+    rules = Object.fromEntries(languages.map(language => [language, { light }]))
+
+    await __events.configuration.fire({
+      affectsConfiguration: (section: string) => section === 'vscode-highlight-text.rules',
+    })
+    expect(window.showWarningMessage).toHaveBeenCalledWith(expect.stringContaining('Decoration type budget exceeded'))
+    previousTypes.forEach(type => expect(type.dispose).not.toHaveBeenCalled())
+
+    editors.forEach(editor => editor.setDecorations.mockClear())
+    vi.mocked(window.createTextEditorDecorationType).mockClear()
+    window.visibleTextEditors = editors.slice(0, 5) as any
+    await __events.visibleEditors.fire([...window.visibleTextEditors])
+
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1_500)
+    previousTypes.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
+    disposeContext(context)
+    __resetVscodeMock()
+  })
+
+  it('reads the current exclude configuration whenever rules change', async () => {
+    let exclude: string[] = []
+    let rules: object = { plaintext: { light: { red: ['foo'] } } }
+    vi.mocked(getConfiguration).mockImplementation((name: string, defaultValue: unknown) => name.endsWith('.rules')
+      ? rules
+      : name.endsWith('.exclude')
+        ? exclude
+        : defaultValue)
+    const editor = createActivationEditor('plaintext')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const previousType = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    vi.mocked(window.createTextEditorDecorationType).mockClear()
+    exclude = ['**/src/**']
+    rules = { plaintext: { light: { green: ['foo'] } } }
+
+    await __events.configuration.fire({
+      affectsConfiguration: (section: string) => section === 'vscode-highlight-text.rules',
+    })
+
+    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    expect(previousType.dispose).toHaveBeenCalledTimes(1)
+    disposeContext(context)
+    __resetVscodeMock()
+  })
+
+  it('does not retry deterministic decoration creation failures on editor lifecycle events', async () => {
+    let rules: object = { plaintext: { light: { red: ['foo'] } } }
+    vi.mocked(getConfiguration).mockImplementation((name: string, defaultValue: unknown) => name.endsWith('.rules')
+      ? rules
+      : name.endsWith('.exclude')
+        ? []
+        : defaultValue)
+    const editor = createActivationEditor('plaintext')
+    window.visibleTextEditors = [editor] as any
+    const context = { subscriptions: [] } as unknown as ExtensionContext
+
+    activate(context)
+    const previousType = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    const partialType = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => partialType as any)
+      .mockImplementationOnce(() => { throw new Error('invalid next style') })
+    rules = { plaintext: { light: { green: ['foo'], yellow: ['bar'] } } }
+    await __events.configuration.fire({ affectsConfiguration: () => true })
+    expect(partialType.dispose).toHaveBeenCalledTimes(1)
+    expect(previousType.dispose).not.toHaveBeenCalled()
+
+    editor.setDecorations.mockClear()
+    vi.mocked(window.createTextEditorDecorationType).mockClear()
+    await __events.visibleEditors.fire([...window.visibleTextEditors])
+
+    expect(window.createTextEditorDecorationType).not.toHaveBeenCalled()
+    expect(previousType.dispose).not.toHaveBeenCalled()
+    disposeContext(context)
+    __resetVscodeMock()
+  })
+})
+
+describe('decoration lifecycle', () => {
+  it('disposes partially created types when initialization fails', () => {
+    const partial = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => partial as any)
+      .mockImplementationOnce(() => { throw new Error('invalid style') })
+
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['a', { color: 'red' }],
+      ['b', { color: 'blue' }],
+    ]))
+    expect(() => manager.prepareProfile('test', ['a', 'b'])).toThrow('invalid style')
+    expect(partial.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('quarantines a failed profile and clears an editor previous profile', () => {
+    const goodType = { dispose: vi.fn() }
+    const partialType = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType)
+      .mockImplementationOnce(() => goodType as any)
+      .mockImplementationOnce(() => partialType as any)
+      .mockImplementationOnce(() => { throw new Error('invalid deferred profile') })
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['good', { color: 'green' }],
+      ['bad-a', { color: 'red' }],
+      ['bad-b', { color: 'blue' }],
+    ]))
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([['good', [range(0, 1)]]]), 'good', ['good'])
+    expect(() => manager.apply(editor, new Map(), 'bad', ['bad-a', 'bad-b'])).toThrow('invalid deferred profile')
+    expect(partialType.dispose).toHaveBeenCalledTimes(1)
+    expect(goodType.dispose).toHaveBeenCalledTimes(1)
+    expect(() => manager.prepareProfile('bad', ['bad-a', 'bad-b'])).toThrow('invalid deferred profile')
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(3)
+    manager.dispose()
+  })
+
+  it('keeps identical visual styles separate across priority layers', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['red', { color: 'red' }],
+      ['blue', { color: 'blue' }],
+    ]))
+    const layers = [
+      { id: 'exact-red', styleId: 'red' },
+      { id: 'sibling-blue', styleId: 'blue' },
+      { id: 'generic-red', styleId: 'red' },
+    ]
+    manager.prepareProfile('jsx', layers)
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
+      [{ color: 'red' }],
+      [{ color: 'blue' }],
+      [{ color: 'red' }],
+    ])
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([
+      ['exact-red', [range(0, 1)]],
+      ['sibling-blue', [range(0, 1), range(2, 3)]],
+      ['generic-red', [range(2, 3)]],
+    ]), 'jsx', layers)
+    expect(editor.setDecorations).toHaveBeenCalledTimes(3)
+    manager.dispose()
+  })
+
+  it('creates language profiles in explicit high-to-low priority order', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['react', { color: 'red' }],
+      ['jsx', { color: 'blue' }],
+      ['tsx', { color: 'green' }],
+    ]))
+    manager.prepareProfile('javascriptreact:light', ['jsx', 'tsx', 'react'])
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
+      [{ color: 'blue' }],
+      [{ color: 'green' }],
+      [{ color: 'red' }],
+    ])
+    manager.dispose()
+  })
+
+  it('releases a reserved profile before its first apply', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.reserveProfile(editor, 'reserved', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    manager.releaseEditor(editor)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('forgets a destroyed editor without calling its decoration API', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'destroyed', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    editor.setDecorations.mockClear()
+
+    manager.forgetEditor(editor)
+
+    expect(editor.setDecorations).not.toHaveBeenCalled()
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('clears every attached editor before disposing a reloaded profile', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const first = new MockEditor() as any
+    const second = new MockEditor() as any
+    manager.apply(first, new Map([['a', [range(0, 1)]]]), 'reload', ['a'])
+    manager.apply(second, new Map([['a', [range(1, 2)]]]), 'reload', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    first.setDecorations.mockClear()
+    second.setDecorations.mockClear()
+
+    manager.clearEditors()
+    manager.dispose()
+
+    expect(first.setDecorations).toHaveBeenCalledWith(type, [])
+    expect(second.setDecorations).toHaveBeenCalledWith(type, [])
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    const lastClearOrder = Math.max(
+      first.setDecorations.mock.invocationCallOrder.at(-1)!,
+      second.setDecorations.mock.invocationCallOrder.at(-1)!,
+    )
+    expect(lastClearOrder).toBeLessThan(type.dispose.mock.invocationCallOrder[0])
+  })
+
+  it('disposes types without calling editor APIs during manager shutdown', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'shutdown', ['a'])
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    editor.setDecorations.mockClear()
+
+    manager.dispose()
+
+    expect(editor.setDecorations).not.toHaveBeenCalled()
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps profile disposal idempotent during reentrant manager cleanup', () => {
+    const type = { dispose: vi.fn() }
+    vi.mocked(window.createTextEditorDecorationType).mockReturnValue(type as any)
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const editor = new MockEditor() as any
+    manager.reserveProfile(editor, 'reentrant', ['a'])
+    type.dispose.mockImplementationOnce(() => manager.dispose())
+
+    manager.releaseEditor(editor)
+
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('shares a profile across split editors and disposes it after the last editor leaves', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const first = new MockEditor() as any
+    const second = new MockEditor() as any
+    manager.apply(first, new Map([['a', [range(0, 1)]]]), 'plaintext:light', ['a'])
+    manager.apply(second, new Map([['a', [range(0, 1)]]]), 'plaintext:light', ['a'])
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1)
+    const type = vi.mocked(window.createTextEditorDecorationType).mock.results[0].value
+    manager.releaseEditor(first)
+    expect(type.dispose).not.toHaveBeenCalled()
+    manager.releaseEditor(second)
+    expect(type.dispose).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('recovers a capacity-limited profile after the previous profile is released', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    const first = new MockEditor() as any
+    const second = new MockEditor() as any
+    const layersA = Array.from({ length: 1_000 }, (_, index) => ({ id: `a-${index}`, styleId: 'a' }))
+    const layersB = Array.from({ length: 1_000 }, (_, index) => ({ id: `b-${index}`, styleId: 'a' }))
+    manager.reserveProfile(first, 'a', layersA)
+    manager.reserveProfile(second, 'a', layersA)
+    expect(() => manager.reserveProfile(first, 'b', layersB)).toThrow('Decoration type budget exceeded')
+    manager.releaseEditor(second)
+    expect(() => manager.reserveProfile(first, 'b', layersB)).not.toThrow()
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2_000)
+    manager.dispose()
+  })
+
+  it('enforces a manager-wide decoration type budget', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]))
+    manager.prepareProfile('first', Array.from({ length: 1_000 }, (_, index) => ({ id: `a-${index}`, styleId: 'a' })))
+    expect(() => manager.prepareProfile('second', Array.from({ length: 501 }, (_, index) => ({ id: `b-${index}`, styleId: 'a' }))))
+      .toThrow('Decoration type budget exceeded')
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(1_000)
+    manager.dispose()
+  })
+
+  it('keeps decoration budgets isolated across manager lifecycles', () => {
+    const managers = Array.from({ length: 3 }, () => new DecorationManager(
+      new Map<string, DecorationRenderOptions>([['a', { color: 'red' }]]),
+    ))
+    for (const [managerIndex, manager] of managers.entries()) {
+      const layers = Array.from({ length: 1_500 }, (_, index) => ({ id: `${managerIndex}-${index}`, styleId: 'a' }))
+      expect(() => manager.prepareProfile(`profile-${managerIndex}`, layers)).not.toThrow()
+    }
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(4_500)
+    const created = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    managers.forEach(manager => manager.dispose())
+    created.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
+  })
+
+  it('reuses types, batches ranges, and never recreates after dispose', () => {
+    const manager = new DecorationManager(new Map<string, DecorationRenderOptions>([
+      ['a', { color: 'red' }],
+      ['c', { color: 'blue' }],
+    ]))
+    manager.prepareProfile('test', ['a', 'c'])
+    expect(vi.mocked(window.createTextEditorDecorationType).mock.calls).toEqual([
+      [{ color: 'red' }],
+      [{ color: 'blue' }],
+    ])
+    const editor = new MockEditor() as any
+    for (let iteration = 0; iteration < 100; iteration++) {
+      manager.apply(editor, new Map([['a', [range(0, 1), range(2, 3)]], ['c', [range(4, 5)]]]), 'test', ['a', 'c'])
+    }
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
+    const created = vi.mocked(window.createTextEditorDecorationType).mock.results.map(result => result.value)
+    manager.dispose()
+    manager.dispose()
+    manager.apply(editor, new Map([['a', [range(0, 1)]]]), 'test', ['a'])
+    expect(window.createTextEditorDecorationType).toHaveBeenCalledTimes(2)
+    created.forEach(type => expect(type.dispose).toHaveBeenCalledTimes(1))
+  })
+})

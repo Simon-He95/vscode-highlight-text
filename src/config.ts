@@ -1,0 +1,575 @@
+import type { DecorationRenderOptions } from 'vscode'
+import type { CompiledConfig, CompiledRule, CompiledTarget, PatternInput, UserConfig } from './type'
+import { isAbsolute } from 'node:path'
+import picomatch from 'picomatch'
+import { DecorationRangeBehavior } from 'vscode'
+import { compilePattern, isPatternTuple, isRegexSafe, normalizePatterns } from './regex'
+
+const MAX_IGNORE_PATTERNS_PER_RULE = 100
+const MAX_EXCLUDE_PATTERNS = 100
+const MAX_EXCLUDE_PATTERN_LENGTH = 1_000
+const MAX_EXCLUDE_CACHE_ENTRIES = 1_000
+const MAX_LANGUAGES = 100
+const MAX_LANGUAGE_KEY_LENGTH = 1000
+const MAX_RULES_PER_MODE = 1000
+const MAX_TARGETS_PER_RULE = 100
+const MAX_TOTAL_RULES = 5000
+const MAX_TOTAL_STYLES = 1000
+const MAX_WARNINGS = 100
+const MAX_STYLE_DEPTH = 12
+const MAX_STYLE_NODES = 500
+const MAX_STYLE_PROPERTIES = 500
+const MAX_STYLE_STRING_UNITS = 20_000
+const STYLE_ONLY_FIELDS = new Set(['match', 'colors', 'matchCss', 'ignoreReg', 'background'])
+const STYLE_IDS = new WeakMap<CompiledConfig, Map<string, string>>()
+const LANGUAGE_ALIASES = new Map<string, readonly string[]>([
+  ['javascriptreact', ['javascriptreact', 'typescriptreact', 'react']],
+  ['markdown', ['markdown', 'md']],
+  ['plaintext', ['plaintext', 'txt']],
+  ['typescriptreact', ['typescriptreact', 'javascriptreact', 'react']],
+  ['vuetsx', ['vuetsx', 'vue']],
+])
+
+interface CompilationBudget {
+  remainingInputs: number
+}
+
+function normalizePatternsWithBudget(value: unknown, budget: CompilationBudget, maxItems: number): PatternInput[] {
+  if (budget.remainingInputs <= 0)
+    return []
+  if (!Array.isArray(value)) {
+    budget.remainingInputs--
+    return normalizePatterns(value)
+  }
+  const count = Math.min(value.length, maxItems, budget.remainingInputs)
+  budget.remainingInputs -= count
+  return normalizePatterns(value.slice(0, count))
+}
+
+function createWarnings(): string[] {
+  const warnings: string[] = []
+  Object.defineProperty(warnings, 'push', {
+    configurable: true,
+    value: (...items: string[]) => Array.prototype.push.apply(
+      warnings,
+      items.slice(0, Math.max(0, MAX_WARNINGS - warnings.length)),
+    ),
+    writable: true,
+  })
+  return warnings
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value))
+    return `[${value.map(stableSerialize).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableSerialize(child)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function validateStyleComplexity(style: Record<string, unknown>): void {
+  const pending: Array<{ depth: number, value: unknown }> = [{ depth: 0, value: style }]
+  const seen = new WeakSet<object>()
+  let nodes = 0
+  let properties = 0
+  let stringUnits = 0
+  while (pending.length) {
+    const { depth, value } = pending.pop()!
+    nodes++
+    if (nodes > MAX_STYLE_NODES || depth > MAX_STYLE_DEPTH)
+      throw new Error('Style exceeds the complexity limit')
+    if (typeof value === 'string') {
+      stringUnits += value.length
+      if (stringUnits > MAX_STYLE_STRING_UNITS)
+        throw new Error('Style exceeds the string-size limit')
+      continue
+    }
+    if (!value || typeof value !== 'object')
+      continue
+    if (seen.has(value))
+      throw new Error('Style contains a circular reference')
+    seen.add(value)
+    if (Array.isArray(value)) {
+      properties += value.length
+      if (properties > MAX_STYLE_PROPERTIES)
+        throw new Error('Style exceeds the property limit')
+      for (let index = 0; index < value.length; index++)
+        pending.push({ depth: depth + 1, value: value[index] })
+      continue
+    }
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key))
+        continue
+      properties++
+      stringUnits += key.length
+      if (properties > MAX_STYLE_PROPERTIES)
+        throw new Error('Style exceeds the property limit')
+      if (stringUnits > MAX_STYLE_STRING_UNITS)
+        throw new Error('Style exceeds the string-size limit')
+      pending.push({ depth: depth + 1, value: (value as Record<string, unknown>)[key] })
+    }
+  }
+}
+
+function warnUnsupportedBackground(source: Record<string, unknown>, context: string, warnings: string[]): void {
+  if (!Object.prototype.hasOwnProperty.call(source, 'background'))
+    return
+  const background = source.background
+  if (typeof background !== 'string')
+    return
+  if (/(?:gradient|url|image-set)\s*\(|(?:^|\s)(?:repeat|no-repeat|padding-box|border-box|content-box)(?:\s|$)|\/\s*(?:cover|contain)(?:\s|$)/i.test(background)) {
+    warnings.push(`\`background\` for ${context} now maps to \`backgroundColor\`; CSS gradients, images, and shorthand values are no longer supported. Use \`backgroundColor\` with a color value instead.`)
+  }
+}
+
+export function normalizeStyle(...sources: Record<string, unknown>[]): DecorationRenderOptions {
+  const style = Object.create(null) as Record<string, unknown>
+  let copiedProperties = 0
+  let copiedKeyUnits = 0
+  let background: unknown
+  for (const source of sources) {
+    for (const key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key))
+        continue
+      copiedProperties++
+      copiedKeyUnits += key.length
+      if (copiedProperties > MAX_STYLE_PROPERTIES)
+        throw new Error('Style exceeds the property limit')
+      if (copiedKeyUnits > MAX_STYLE_STRING_UNITS)
+        throw new Error('Style exceeds the string-size limit')
+      if (key === 'background')
+        background = source[key]
+      if (!STYLE_ONLY_FIELDS.has(key))
+        style[key] = source[key]
+    }
+  }
+  if (background !== undefined && style.backgroundColor === undefined)
+    style.backgroundColor = background
+  validateStyleComplexity(style)
+  return style as DecorationRenderOptions
+}
+
+function addStyle(config: CompiledConfig, style: DecorationRenderOptions): string {
+  const canonical = stableSerialize(style)
+  const ids = STYLE_IDS.get(config) ?? new Map<string, string>()
+  STYLE_IDS.set(config, ids)
+  const existing = ids.get(canonical)
+  if (existing) {
+    if (!config.styles.has(existing))
+      config.styles.set(existing, style)
+    return existing
+  }
+  if (config.styles.size >= MAX_TOTAL_STYLES)
+    throw new Error(`Configuration exceeds ${MAX_TOTAL_STYLES} unique styles`)
+  const id = `s${ids.size}`
+  ids.set(canonical, id)
+  config.styles.set(id, style)
+  return id
+}
+
+function isStyleObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function compileTargets(
+  option: Record<string, unknown> | undefined,
+  base: Record<string, unknown>,
+  commonStyle: DecorationRenderOptions,
+  context: string,
+  config: CompiledConfig,
+): CompiledTarget[] | undefined {
+  if (option && 'matchCss' in option) {
+    if (!Array.isArray(option.matchCss)) {
+      config.warnings.push(`Invalid matchCss for ${context}: expected an array of style objects`)
+      return
+    }
+    if (option.matchCss.length > MAX_TARGETS_PER_RULE) {
+      config.warnings.push(`Invalid matchCss for ${context}: at most ${MAX_TARGETS_PER_RULE} targets are allowed`)
+      return
+    }
+    const styles = option.matchCss.filter(isStyleObject)
+    if (styles.length !== option.matchCss.length) {
+      config.warnings.push(`Invalid matchCss entries for ${context}: expected style objects`)
+      return
+    }
+    if (!styles.length) {
+      config.warnings.push(`Invalid matchCss for ${context}: at least one style is required`)
+      return
+    }
+    return styles.map((style, index) => {
+      warnUnsupportedBackground(style, `${context} matchCss[${index}]`, config.warnings)
+      return {
+        groupIndex: index + 1,
+        styleId: addStyle(config, normalizeStyle(base, style)),
+      }
+    })
+  }
+
+  if (option && 'colors' in option) {
+    if (!Array.isArray(option.colors)) {
+      config.warnings.push(`Invalid colors for ${context}: expected an array of strings`)
+      return
+    }
+    if (option.colors.length > MAX_TARGETS_PER_RULE) {
+      config.warnings.push(`Invalid colors for ${context}: at most ${MAX_TARGETS_PER_RULE} targets are allowed`)
+      return
+    }
+    const colors = option.colors.filter((value): value is string => typeof value === 'string')
+    if (colors.length !== option.colors.length) {
+      config.warnings.push(`Invalid colors entries for ${context}: expected strings`)
+      return
+    }
+    if (!colors.length) {
+      config.warnings.push(`Invalid colors for ${context}: at least one color is required`)
+      return
+    }
+    return colors.map((color, index) => ({
+      groupIndex: index + 1,
+      styleId: addStyle(config, normalizeStyle(base, { color })),
+    }))
+  }
+
+  return [{ styleId: addStyle(config, commonStyle) }]
+}
+
+function compileStyleRules(
+  color: string,
+  raw: unknown,
+  context: string,
+  layerContextId: string,
+  config: CompiledConfig,
+  budget: CompilationBudget,
+  maxPatterns = MAX_RULES_PER_MODE,
+): CompiledRule[] {
+  const base: Record<string, unknown> = {
+    color,
+    isWholeLine: false,
+    rangeBehavior: DecorationRangeBehavior.ClosedClosed,
+  }
+  const option = isStyleObject(raw) ? raw as UserConfig & Record<string, unknown> : undefined
+  const rawPatterns = option ? option.match : raw
+  const patternLimit = Math.min(MAX_RULES_PER_MODE, maxPatterns)
+  if (Array.isArray(rawPatterns) && rawPatterns.length > patternLimit) {
+    const limit = patternLimit < MAX_RULES_PER_MODE
+      ? `limited to the remaining ${patternLimit} rules`
+      : `at most ${MAX_RULES_PER_MODE} patterns are allowed`
+    config.warnings.push(`Too many match patterns for ${context}: ${limit}`)
+  }
+  let patterns: PatternInput[]
+  if (option) {
+    patterns = normalizePatternsWithBudget(option.match, budget, patternLimit)
+  }
+  else {
+    patterns = normalizePatternsWithBudget(raw, budget, patternLimit)
+    if (isPatternTuple(raw))
+      config.warnings.push(`Ambiguous rule for ${context}: interpreted as two patterns; wrap it in an array, for example [["pattern", "gm"]], to pass flags`)
+  }
+  if (!patterns.length) {
+    config.warnings.push(`Invalid match patterns for ${context}`)
+    return []
+  }
+  if (option)
+    warnUnsupportedBackground(option, context, config.warnings)
+  const commonStyle = normalizeStyle(base, option ?? {})
+  const targets = compileTargets(option, base, commonStyle, context, config)
+  if (!targets)
+    return []
+
+  let ignores: ReturnType<typeof compilePattern>[] = []
+  if (option && 'ignoreReg' in option) {
+    if (Array.isArray(option.ignoreReg) && option.ignoreReg.length > MAX_IGNORE_PATTERNS_PER_RULE) {
+      config.warnings.push(`Invalid ignoreReg for ${context}: at most ${MAX_IGNORE_PATTERNS_PER_RULE} patterns are allowed`)
+      return []
+    }
+    if (!Array.isArray(option.ignoreReg)) {
+      config.warnings.push(`Invalid ignoreReg for ${context}: expected an array of patterns`)
+      return []
+    }
+    if (option.ignoreReg.length > budget.remainingInputs) {
+      config.warnings.push(`Configuration input budget was reached while compiling ignoreReg for ${context}`)
+      return []
+    }
+    const ignorePatterns = normalizePatternsWithBudget(option.ignoreReg, budget, MAX_IGNORE_PATTERNS_PER_RULE)
+    if (ignorePatterns.length !== option.ignoreReg.length) {
+      config.warnings.push(`Invalid ignoreReg entries for ${context}: expected patterns`)
+      return []
+    }
+    let invalidIgnore = false
+    ignores = ignorePatterns.flatMap((input) => {
+      try {
+        const pattern = compilePattern(input)
+        if (!isRegexSafe(new RegExp(pattern.source, pattern.flags)))
+          config.warnings.push(`Potentially expensive ignoreReg for ${context}: ${pattern.source}`)
+        return [pattern]
+      }
+      catch (error) {
+        invalidIgnore = true
+        config.warnings.push(`Invalid ignoreReg for ${context}: ${error instanceof Error ? error.message : String(error)}`)
+        return []
+      }
+    })
+    if (invalidIgnore)
+      return []
+  }
+
+  const seenPatterns = new Set<string>()
+  return patterns.flatMap((input, patternIndex) => {
+    try {
+      const pattern = compilePattern(input)
+      const canonicalFlags = new RegExp(pattern.source, pattern.flags).flags
+      const patternKey = JSON.stringify([pattern.source, canonicalFlags])
+      if (seenPatterns.has(patternKey)) {
+        config.warnings.push(`Duplicate pattern for ${context} was ignored: /${pattern.source}/${canonicalFlags}`)
+        return []
+      }
+      seenPatterns.add(patternKey)
+      if (!isRegexSafe(new RegExp(pattern.source, pattern.flags)))
+        config.warnings.push(`Potentially expensive regular expression for ${context}: ${pattern.source}`)
+      return [{
+        context,
+        id: JSON.stringify([layerContextId, patternIndex, pattern.source, canonicalFlags]),
+        layerContextId,
+        ignores,
+        pattern,
+        targets,
+      }]
+    }
+    catch (error) {
+      config.warnings.push(`Invalid pattern for ${context}: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
+  })
+}
+
+function rollbackStyles(config: CompiledConfig, styleIds: Set<string>, canonicalKeys: Set<string>): void {
+  for (const styleId of config.styles.keys()) {
+    if (!styleIds.has(styleId))
+      config.styles.delete(styleId)
+  }
+  const ids = STYLE_IDS.get(config)
+  if (!ids)
+    return
+  for (const canonical of ids.keys()) {
+    if (!canonicalKeys.has(canonical))
+      ids.delete(canonical)
+  }
+}
+
+function compileMode(raw: unknown, language: string, mode: 'dark' | 'light', config: CompiledConfig, budget: CompilationBudget, maxRules = MAX_RULES_PER_MODE): CompiledRule[] {
+  if (!isStyleObject(raw))
+    return []
+  const rules: CompiledRule[] = []
+  for (const color in raw) {
+    if (!Object.prototype.hasOwnProperty.call(raw, color))
+      continue
+    if (budget.remainingInputs <= 0) {
+      config.warnings.push('Configuration input budget was reached; remaining style entries were skipped')
+      break
+    }
+    if (rules.length >= maxRules) {
+      config.warnings.push(`Too many rules for ${language}.${mode}: at most ${MAX_RULES_PER_MODE} rules are allowed`)
+      break
+    }
+    budget.remainingInputs--
+    const value = raw[color]
+    const previousStyleIds = new Set(config.styles.keys())
+    const previousCanonicalKeys = new Set(STYLE_IDS.get(config)?.keys() ?? [])
+    try {
+      const remaining = maxRules - rules.length
+      const compiled = compileStyleRules(color, value, `${language}.${mode}.${color}`, JSON.stringify([language, mode, color]), config, budget, remaining)
+      if (!compiled.length)
+        rollbackStyles(config, previousStyleIds, previousCanonicalKeys)
+      rules.push(...compiled)
+    }
+    catch (error) {
+      rollbackStyles(config, previousStyleIds, previousCanonicalKeys)
+      config.warnings.push(`Invalid configuration for ${language}.${mode}.${color}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return rules
+}
+
+export function compileConfig(raw: unknown): CompiledConfig {
+  const result: CompiledConfig = {
+    languages: new Map(),
+    styles: new Map(),
+    warnings: createWarnings(),
+  }
+  if (!isStyleObject(raw)) {
+    result.warnings.push('vscode-highlight-text.rules must be an object')
+    return result
+  }
+
+  let compiledRuleCount = 0
+  let processedLanguageKeys = 0
+  const compilationBudget: CompilationBudget = { remainingInputs: MAX_TOTAL_RULES }
+  for (const languageKey in raw) {
+    if (!Object.prototype.hasOwnProperty.call(raw, languageKey))
+      continue
+    if (processedLanguageKeys >= MAX_TOTAL_RULES) {
+      result.warnings.push(`Configuration is limited to ${MAX_TOTAL_RULES} language keys`)
+      break
+    }
+    processedLanguageKeys++
+    if (compiledRuleCount >= MAX_TOTAL_RULES || compilationBudget.remainingInputs <= 0) {
+      result.warnings.push('Configuration compilation budget was reached; remaining language keys were skipped')
+      break
+    }
+    if (languageKey.length > MAX_LANGUAGE_KEY_LENGTH) {
+      result.warnings.push(`Language key exceeds ${MAX_LANGUAGE_KEY_LENGTH} characters and was skipped`)
+      continue
+    }
+    let availableLanguages = MAX_LANGUAGES - result.languages.size
+    const languages: string[] = []
+    let segmentStart = 0
+    for (let index = 0; index <= languageKey.length && languages.length < MAX_LANGUAGES; index++) {
+      if (index < languageKey.length && languageKey[index] !== '|')
+        continue
+      const language = languageKey.slice(segmentStart, index).trim()
+      segmentStart = index + 1
+      if (!language || languages.includes(language))
+        continue
+      if (result.languages.has(language)) {
+        languages.push(language)
+      }
+      else if (availableLanguages > 0) {
+        availableLanguages--
+        languages.push(language)
+      }
+    }
+    if (!languages.length) {
+      result.warnings.push(`Too many languages: at most ${MAX_LANGUAGES} languages are allowed`)
+      continue
+    }
+    compilationBudget.remainingInputs--
+    const modes = raw[languageKey]
+    if (!isStyleObject(modes)) {
+      result.warnings.push(`Rules for ${languageKey} must be an object`)
+      continue
+    }
+
+    const darkLimit = Math.min(MAX_RULES_PER_MODE, MAX_TOTAL_RULES - compiledRuleCount)
+    const dark = compileMode(modes.dark, languageKey, 'dark', result, compilationBudget, darkLimit)
+    compiledRuleCount += dark.length
+    const lightLimit = Math.min(MAX_RULES_PER_MODE, MAX_TOTAL_RULES - compiledRuleCount)
+    const light = compileMode(modes.light, languageKey, 'light', result, compilationBudget, lightLimit)
+    compiledRuleCount += light.length
+    const compiled = { dark, light }
+
+    for (const language of languages) {
+      const existing = result.languages.get(language)
+      if (!existing) {
+        result.languages.set(language, compiled)
+        continue
+      }
+      const mergedDark = [...compiled.dark, ...existing.dark]
+      const mergedLight = [...compiled.light, ...existing.light]
+      if (mergedDark.length > MAX_RULES_PER_MODE || mergedLight.length > MAX_RULES_PER_MODE)
+        result.warnings.push(`Too many merged rules for ${language}: at most ${MAX_RULES_PER_MODE} rules per mode are allowed`)
+      result.languages.set(language, {
+        dark: mergedDark.slice(0, MAX_RULES_PER_MODE),
+        light: mergedLight.slice(0, MAX_RULES_PER_MODE),
+      })
+    }
+  }
+
+  const usedRules = new Set<CompiledRule>()
+  const usedStyleIds = new Set<string>()
+  for (const modes of result.languages.values()) {
+    for (const rule of [...modes.dark, ...modes.light]) {
+      if (usedRules.has(rule))
+        continue
+      usedRules.add(rule)
+      rule.targets.forEach(target => usedStyleIds.add(target.styleId))
+    }
+  }
+  for (const styleId of result.styles.keys()) {
+    if (!usedStyleIds.has(styleId))
+      result.styles.delete(styleId)
+  }
+  // Canonical keys are compile-time-only; dropping the registry prevents pruned styles from being retained.
+  STYLE_IDS.delete(result)
+  return result
+}
+
+function normalizeFilterPath(value: string): string {
+  let normalized = value.replace(/\\/g, '/')
+  if (/^\/[a-z]:\//i.test(normalized))
+    normalized = normalized.slice(1)
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized
+}
+
+export function createExcludeFilter(value: unknown, warnings: string[] = []): (path: string) => boolean {
+  const patterns: Array<{
+    caseInsensitiveMatcher: ReturnType<typeof picomatch>
+    caseSensitiveMatcher: ReturnType<typeof picomatch>
+    negated: boolean
+  }> = []
+  if (!Array.isArray(value)) {
+    warnings.push('Exclude configuration must be an array of glob patterns')
+  }
+  else {
+    if (value.length > MAX_EXCLUDE_PATTERNS)
+      warnings.push(`Exclude configuration was limited to ${MAX_EXCLUDE_PATTERNS} patterns`)
+    let invalidTypeReported = false
+    for (let index = 0; index < Math.min(value.length, MAX_EXCLUDE_PATTERNS); index++) {
+      const pattern = value[index]
+      if (typeof pattern !== 'string') {
+        if (!invalidTypeReported) {
+          warnings.push('Non-string exclude patterns were ignored')
+          invalidTypeReported = true
+        }
+        continue
+      }
+      if (pattern.length > MAX_EXCLUDE_PATTERN_LENGTH) {
+        warnings.push(`Exclude pattern ${index + 1} exceeds ${MAX_EXCLUDE_PATTERN_LENGTH} characters and was ignored`)
+        continue
+      }
+      const negated = pattern.startsWith('!')
+      const body = normalizeFilterPath(negated ? pattern.slice(1) : pattern)
+      const absolute = isAbsolute(body) || /^[a-z]:\//i.test(body) || body.startsWith('//')
+      const normalized = absolute || body.startsWith('**') ? body : `**/${body}`
+      try {
+        patterns.push({
+          caseSensitiveMatcher: picomatch(normalized, { dot: true }),
+          caseInsensitiveMatcher: picomatch(normalized, { dot: true, nocase: true }),
+          negated,
+        })
+      }
+      catch (error) {
+        warnings.push(`Exclude pattern ${index + 1} is invalid and was ignored: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+  const cache = new Map<string, boolean>()
+  return (path) => {
+    const normalizedPath = normalizeFilterPath(path)
+    const cached = cache.get(normalizedPath)
+    if (cached !== undefined)
+      return cached
+    const windowsPath = /^[a-z]:\//i.test(normalizedPath) || normalizedPath.startsWith('//')
+    let included = true
+    for (const pattern of patterns) {
+      const matcher = windowsPath ? pattern.caseInsensitiveMatcher : pattern.caseSensitiveMatcher
+      if (matcher(normalizedPath))
+        included = pattern.negated
+    }
+    if (cache.size >= MAX_EXCLUDE_CACHE_ENTRIES)
+      cache.clear()
+    cache.set(normalizedPath, included)
+    return included
+  }
+}
+
+export function getRulesForLanguage(config: CompiledConfig, languageId: string, dark: boolean, warnings?: string[]): CompiledRule[] {
+  const languages = LANGUAGE_ALIASES.get(languageId) ?? [languageId]
+  const mode = dark ? 'dark' : 'light'
+  const rules = [...new Set(languages.flatMap(language => config.languages.get(language)?.[mode] ?? []))]
+  if (rules.length > MAX_RULES_PER_MODE)
+    warnings?.push(`Rules for ${languageId}.${mode} were limited to ${MAX_RULES_PER_MODE} after alias merging`)
+  return rules.slice(0, MAX_RULES_PER_MODE)
+}

@@ -1,575 +1,1211 @@
-import type { DecorationRenderOptions, Range } from 'vscode'
-import type { ClearStyle, UserConfig } from './type'
-import { createFilter } from '@rollup/pluginutils'
-import { addEventListener, createExtension, createRange, createSelect, createStyle, getActiveText, getActiveTextEditor, getActiveTextEditorLanguageId, getConfiguration, getCurrentFileUrl, getPosition, isDark, message, registerCommand, setConfiguration, setStyle } from '@vscode-use/utils'
-import { debounce, deepMerge, isArray, isObject } from 'lazy-js-utils'
-import { DecorationRangeBehavior } from 'vscode'
+import type { ExtensionContext, TextDocument, TextEditor, Range as VscodeRange } from 'vscode'
+import type { RegexExecutionOptions } from './regex-worker'
+import type { LatestTaskContext } from './scheduler'
+import type { CompiledConfig, CompiledRule } from './type'
+import { createSelect, getConfiguration, setConfiguration } from '@vscode-use/utils'
+import { deepMerge } from 'lazy-js-utils'
+import { ColorThemeKind, commands, Position, Range, window, workspace } from 'vscode'
+import { compileConfig, createExcludeFilter, getRulesForLanguage } from './config'
+import { DecorationBudgetExceededError, DecorationManager } from './decorations'
+import { isRegexExecutionAbortedError, isRegexExecutionBudgetError, isRegexExecutionInfrastructureError, isRegexExecutionLimitError, isRegexExecutionTimeoutError, RegexExecutor } from './regex-worker'
+import { aggregateSnapshots, RefreshBudget, RuleFailureRegistry } from './runtime-control'
+import { LatestTaskScheduler } from './scheduler'
 import templates from './template'
-import { safeMatchAll, safeReplace } from './utils'
 
-const defaultConfig = {
-  vue: {
-    light: {
-      'purple': {
-        match: [
-          'v-if',
-          'v-else-if',
-          'v-else',
-        ],
-        before: {
-          contentText: '✨',
-        },
-      },
-      '#B392F0': [
-        'v-for',
-      ],
-      '#FFC83D': [
-        '<template\\s+(\\#[^\\s\\/>=]+)',
-        'v-bind',
-        'v-once',
-        'v-on',
-        '(v-slot:[^>\\s\\/>]+)',
-        'v-html',
-        'v-text',
-      ],
-      'rgb(99, 102, 241)': [
-        ':is',
-      ],
-      'rgb(14, 165, 233)': [
-        '(defineProps)[<\\(]',
-        'defineOptions',
-        'defineEmits',
-        'defineExpose',
-      ],
-    },
-    dark: {
-      'purple': {
-        match: [
-          'v-if',
-          'v-else-if',
-          'v-else',
-        ],
-        before: {
-          contentText: '✨',
-        },
-      },
-      '#B392F0': [
-        'v-for',
-      ],
-      '#FFC83D': [
-        '<template\\s+(\\#[^\\s\\/>=]+)',
-        'v-bind',
-        'v-once',
-        'v-on',
-        '(v-slot:[^>\\s\\/>]+)',
-        'v-html',
-        'v-text',
-      ],
-      'rgb(99, 102, 241)': {
-        match: [
-          ':is',
-        ],
-      },
-      'rgb(14, 165, 233)': [
-        '(defineProps)[<\\(]',
-        'defineOptions',
-        'defineEmits',
-        'defineExpose',
-      ],
-    },
-  },
-  react: {
-    light: {},
-    dark: {},
-  },
-}
-const clearStyle: ClearStyle = {}
-const MAX_CACHE_SIZE = 50 // 限制缓存文件数量，防止内存泄漏
-const MAX_TEXT_SIZE = 500000 // 限制处理的文本大小，防止性能问题
-const REGEX_CACHE = new Map<string, RegExp>() // 正则表达式缓存
-const MAX_REGEX_CACHE_SIZE = 200 // 限制正则缓存大小
-let config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
+const MAX_SCAN_SIZE = 200_000
+const MAX_MATCHES_PER_RULE = 1_000
+const MAX_TOTAL_RANGES = 10_000
+const MAX_TOTAL_SCAN_TIME = 1_000
+const MAX_SESSION_SCAN_TIME = 5_000
+const REGEX_EXECUTION_TIMEOUT = 500
+const MAX_JOBS_PER_CHUNK = 25
+const MAX_SESSION_JOBS = 1_000
+const MAX_TIMEOUTS_PER_CHUNK = 3
+const MAX_SESSION_CONTINUATIONS = 40
+const MAX_PROFILE_LAYERS = 300
+const REGEX_FAILURE_COOLDOWN = 30_000
+const MAX_REMEMBERED_WARNINGS = 100
+const OVERSCAN_LINES = 20
+const MAX_VUE_LANGUAGE_DETECTION_SIZE = 300_000
+const UPDATE_DELAY = 100
+const documentInstanceIds = new WeakMap<TextDocument, number>()
+let nextDocumentInstanceId = 0
 
-// 缓存正则表达式，避免重复编译
-function getCachedRegex(pattern: string, flags: string = 'gm'): RegExp {
-  const key = `${pattern}::${flags}`
-
-  if (REGEX_CACHE.has(key)) {
-    const cached = REGEX_CACHE.get(key)!
-    // 重置lastIndex，防止状态污染
-    cached.lastIndex = 0
-    return cached
+export function getDocumentCacheIdentity(document: TextDocument): string {
+  let instanceId = documentInstanceIds.get(document)
+  if (instanceId === undefined) {
+    instanceId = ++nextDocumentInstanceId
+    documentInstanceIds.set(document, instanceId)
   }
+  const uri = document.uri
+  const serializedUri = typeof uri.toString === 'function' && uri.toString !== Object.prototype.toString
+    ? uri.toString(true)
+    : JSON.stringify([uri.scheme, uri.authority, uri.path, uri.query, uri.fragment])
+  return JSON.stringify([serializedUri, instanceId])
+}
 
-  // 清理缓存，防止内存泄漏
-  if (REGEX_CACHE.size >= MAX_REGEX_CACHE_SIZE) {
-    const firstKey = REGEX_CACHE.keys().next().value
-    if (firstKey) {
-      REGEX_CACHE.delete(firstKey)
+interface RuleSnapshot {
+  documentVersion: number
+  scanKey: string
+  rangesByStyle: Map<string, VscodeRange[]>
+}
+
+interface PendingRange {
+  end: number
+  start: number
+}
+
+interface ScanSession {
+  acceptedRangeKeys: Set<string>
+  candidateKeys: Set<string>
+  candidateSnapshot: Map<string, PendingRange[]>
+  currentRuleMatchCount: number
+  failedRuleIds: Set<string>
+  continuationCount: number
+  elapsedScanTime: number
+  infrastructureRetryCount: number
+  workerJobCount: number
+  key: string
+  nextRuleIndex: number
+  nextSliceIndex: number
+  previousSnapshots: Map<string, RuleSnapshot>
+  scannedSnapshots: Map<string, Map<string, VscodeRange[]>>
+  scanPlan: ScanPlan
+}
+
+export function resetCurrentRuleState(session: Pick<ScanSession, 'candidateKeys' | 'candidateSnapshot' | 'currentRuleMatchCount' | 'nextSliceIndex'>): void {
+  session.candidateKeys = new Set()
+  session.candidateSnapshot = new Map()
+  session.currentRuleMatchCount = 0
+  session.nextSliceIndex = 0
+}
+
+interface VisibleScanPlan {
+  complete: boolean
+  ranges: Array<{ end: number, start: number }>
+  scanKey: string
+}
+
+interface ScanPlan {
+  scanKey: string
+  slices: ScanSlice[]
+}
+
+interface ScanSlice {
+  acceptedIntervals: Array<[number, number]>
+  artificialEnd: boolean
+  artificialStart: boolean
+  scanStart: number
+  text: string
+  textKey: string
+}
+
+function getExecutionDuration(error: unknown): number {
+  return error && typeof error === 'object' && 'executionMs' in error && typeof error.executionMs === 'number'
+    ? error.executionMs
+    : 0
+}
+
+function getDocumentPath(document: TextDocument): string {
+  return document.uri.scheme === 'file' ? document.uri.fsPath : document.uri.path
+}
+
+function isDarkTheme(): boolean {
+  return window.activeColorTheme.kind === ColorThemeKind.Dark
+    || window.activeColorTheme.kind === ColorThemeKind.HighContrast
+}
+
+export function previousCodePointOffset(document: TextDocument, offset: number): number {
+  if (offset <= 0)
+    return 0
+  const probeStart = Math.max(0, offset - 2)
+  const probe = document.getText(new Range(document.positionAt(probeStart), document.positionAt(offset)))
+  const last = probe.charCodeAt(probe.length - 1)
+  const previous = probe.charCodeAt(probe.length - 2)
+  return offset - (last >= 0xDC00 && last <= 0xDFFF && previous >= 0xD800 && previous <= 0xDBFF ? 2 : 1)
+}
+
+export function nextCodePointOffset(document: TextDocument, offset: number, documentEnd: number): number {
+  if (offset >= documentEnd)
+    return documentEnd
+  const probeEnd = Math.min(documentEnd, offset + 2)
+  const probe = document.getText(new Range(document.positionAt(offset), document.positionAt(probeEnd)))
+  const first = probe.charCodeAt(0)
+  const second = probe.charCodeAt(1)
+  return offset + (first >= 0xD800 && first <= 0xDBFF && second >= 0xDC00 && second <= 0xDFFF ? 2 : 1)
+}
+
+function getVisibleScanPlan(editor: TextEditor): VisibleScanPlan {
+  const document = editor.document
+  const visible = editor.visibleRanges
+    .map(range => ({ start: document.offsetAt(range.start), end: document.offsetAt(range.end) }))
+    .sort((a, b) => a.start - b.start)
+  const ranges: Array<{ end: number, start: number }> = []
+  for (const range of visible) {
+    const previous = ranges.at(-1)
+    if (previous && range.start <= previous.end)
+      previous.end = Math.max(previous.end, range.end)
+    else
+      ranges.push({ ...range })
+  }
+  const scanKey = ranges.map(range => `${range.start}:${range.end}`).join(',')
+  const visibleSize = ranges.reduce((total, range) => total + range.end - range.start, 0)
+  return { complete: visibleSize <= MAX_SCAN_SIZE, ranges, scanKey }
+}
+
+function getScanSlices(editor: TextEditor, visiblePlan: VisibleScanPlan): ScanPlan {
+  const document = editor.document
+  const documentEnd = document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end)
+  const visibleSize = visiblePlan.ranges.reduce((total, range) => total + range.end - range.start, 0)
+  const contexts = visiblePlan.ranges.map((range) => {
+    const startLine = document.positionAt(range.start).line
+    const endLine = document.positionAt(range.end).line
+    const contextStartLine = Math.max(0, startLine - OVERSCAN_LINES)
+    const contextEndLine = Math.min(document.lineCount - 1, endLine + OVERSCAN_LINES)
+    return {
+      contextEnd: document.offsetAt(document.lineAt(contextEndLine).rangeIncludingLineBreak.end),
+      contextStart: document.offsetAt(new Position(contextStartLine, 0)),
+      visible: range,
     }
-  }
+  })
 
-  try {
-    const regex = new RegExp(pattern, flags)
-    REGEX_CACHE.set(key, regex)
-    return regex
-  }
-  catch (error) {
-    message.error(`Invalid regex pattern: ${pattern}`)
-    throw error
-  }
+  let contextBudget = MAX_SCAN_SIZE - visibleSize
+  const planned = contexts.map((context, index) => {
+    const remainingContexts = contexts.length - index
+    const share = Math.floor(contextBudget / remainingContexts)
+    const leftAvailable = context.visible.start - context.contextStart
+    const rightAvailable = context.contextEnd - context.visible.end
+    const left = Math.min(leftAvailable, Math.floor(share / 2))
+    const right = Math.min(rightAvailable, share - left)
+    contextBudget -= left + right
+    let scanStart = context.visible.start - left
+    let scanEnd = context.visible.end + right
+    if (scanStart < context.visible.start) {
+      const probe = document.getText(new Range(document.positionAt(Math.max(0, scanStart - 1)), document.positionAt(Math.min(documentEnd, scanStart + 1))))
+      if (probe.length === 2 && probe.charCodeAt(0) >= 0xD800 && probe.charCodeAt(0) <= 0xDBFF && probe.charCodeAt(1) >= 0xDC00 && probe.charCodeAt(1) <= 0xDFFF)
+        scanStart++
+    }
+    if (scanEnd > context.visible.end && scanEnd < documentEnd) {
+      const probe = document.getText(new Range(document.positionAt(scanEnd - 1), document.positionAt(scanEnd + 1)))
+      if (probe.length === 2 && probe.charCodeAt(0) >= 0xD800 && probe.charCodeAt(0) <= 0xDBFF && probe.charCodeAt(1) >= 0xDC00 && probe.charCodeAt(1) <= 0xDFFF)
+        scanEnd--
+    }
+    if (scanStart > 0)
+      scanStart = previousCodePointOffset(document, scanStart)
+    if (scanEnd < documentEnd)
+      scanEnd = nextCodePointOffset(document, scanEnd, documentEnd)
+    return {
+      acceptedIntervals: [[context.visible.start - scanStart, context.visible.end - scanStart] as [number, number]],
+      artificialEnd: scanEnd < documentEnd,
+      artificialStart: scanStart > 0,
+      scanEnd,
+      scanStart,
+    }
+  })
+  const slices = planned.map(({ scanEnd, ...slice }, index) => ({
+    ...slice,
+    text: document.getText(new Range(document.positionAt(slice.scanStart), document.positionAt(scanEnd))),
+    textKey: JSON.stringify([getDocumentCacheIdentity(document), document.version, visiblePlan.scanKey, index, slice.scanStart, scanEnd]),
+  }))
+  return { scanKey: visiblePlan.scanKey, slices }
 }
 
-// 检查正则表达式是否安全，防止回溯过多
-function isRegexSafe(regex: RegExp): boolean {
-  const source = regex.source
-  // 检查危险的正则模式
-  const dangerousPatterns = [
-    /\(\?!/g, // 负向先行断言
-    /\(\?</g, // 负向后行断言
-    /\*\+/g, // 嵌套量词 *+
-    /\+\*/g, // 嵌套量词 +*
-    /\{\d+,\}\*/g, // 大范围量词后跟 *
-    /\{\d+,\}\+/g, // 大范围量词后跟 +
-  ]
+export async function scanRule(
+  executor: RegexExecutor,
+  rule: CompiledRule,
+  slice: ScanSlice,
+  signal: AbortSignal,
+  maxMatches: number,
+  acceptedMatchOffset: number,
+  maxSpans: number,
+  refreshSpanBudget: boolean,
+  executionOptions?: RegexExecutionOptions,
+): Promise<{ acceptedMatchCount: number, executionMs: number, ranges: Array<{ end: number, start: number, styleId: string }>, truncated: boolean }> {
+  let executionMs = 0
+  const matches = await executor.execute({
+    acceptedIntervals: slice.acceptedIntervals,
+    acceptedMatchOffset,
+    artificialEnd: slice.artificialEnd,
+    artificialStart: slice.artificialStart,
+    ignores: rule.ignores,
+    includeFullSpan: true,
+    maxMatches,
+    maxSpans,
+    refreshSpanBudget,
+    pattern: rule.pattern,
+    targetGroups: rule.targets.map(target => target.groupIndex),
+    text: slice.text,
+    textKey: slice.textKey,
+  }, signal, durationMs => executionMs = durationMs, executionOptions)
 
-  for (const pattern of dangerousPatterns) {
-    if (pattern.test(source)) {
+  let acceptedMatchCount = 0
+  const ranges = matches.flatMap((match) => {
+    if (
+      !match.fullSpan
+      || (slice.artificialStart && match.fullSpan[0] === 0)
+      || (slice.artificialEnd && match.fullSpan[1] === slice.text.length)
+    ) {
+      return []
+    }
+    const matchRanges = match.spans.flatMap((span, index) => {
+      if (!span)
+        return []
+      const start = slice.scanStart + span[0]
+      const end = slice.scanStart + span[1]
+      return [{ start, end, styleId: rule.targets[index].decorationId ?? rule.targets[index].styleId }]
+    })
+    if (matchRanges.length)
+      acceptedMatchCount++
+    return matchRanges
+  })
+  return { acceptedMatchCount, executionMs, ranges, truncated: matches.truncated === true }
+}
+
+const languageDetectionCache = new WeakMap<TextDocument, { languageId: string, result: string, version: number }>()
+
+function isAsciiTagNameCharacter(character: string): boolean {
+  return character === '-'
+    || character === '_'
+    || (character >= '0' && character <= '9')
+    || (character >= 'a' && character <= 'z')
+}
+
+function findVueBlockEnd(lower: string, contentStart: number, blockName: 'script' | 'template'): number {
+  let cursor = contentStart
+  let depth = 1
+  while (cursor < lower.length) {
+    const start = lower.indexOf('<', cursor)
+    if (start < 0)
+      return -1
+    if (lower.startsWith('<!--', start)) {
+      const commentEnd = lower.indexOf('-->', start + 4)
+      if (commentEnd < 0)
+        return -1
+      cursor = commentEnd + 3
+      continue
+    }
+    const closing = lower.startsWith(`</${blockName}`, start)
+    const opening = blockName === 'template' && lower.startsWith('<template', start)
+    if (!closing && !opening) {
+      cursor = start + 1
+      continue
+    }
+    const nameEnd = start + blockName.length + (closing ? 2 : 1)
+    const boundary = lower[nameEnd]
+    if (boundary && isAsciiTagNameCharacter(boundary)) {
+      cursor = nameEnd
+      continue
+    }
+    const limit = Math.min(lower.length, start + 4_097)
+    let end = -1
+    let quote = ''
+    for (let index = nameEnd; index < limit; index++) {
+      const character = lower[index]
+      if (quote) {
+        if (character === quote)
+          quote = ''
+        continue
+      }
+      if (character === '"' || character === '\'') {
+        quote = character
+        continue
+      }
+      if (character === '>') {
+        end = index
+        break
+      }
+      if (character === '<')
+        break
+    }
+    if (end < 0) {
+      cursor = limit
+      continue
+    }
+    if (closing) {
+      depth--
+      if (!depth)
+        return end + 1
+    }
+    else if (!lower.slice(nameEnd, end).trimEnd().endsWith('/')) {
+      depth++
+    }
+    cursor = end + 1
+  }
+  return -1
+}
+
+export function containsVueTsxBlock(text: string): boolean {
+  const lower = text.toLowerCase()
+  let cursor = 0
+  while (cursor < lower.length) {
+    const start = lower.indexOf('<', cursor)
+    if (start < 0)
       return false
-    }
-  }
-
-  // 检查字符类的复杂度
-  const charClassMatches = source.match(/\[[^\]]*\]/g)
-  if (charClassMatches) {
-    for (const charClass of charClassMatches) {
-      if (charClass.length > 50) { // 字符类过长
+    if (lower.startsWith('<!--', start)) {
+      const commentEnd = lower.indexOf('-->', start + 4)
+      if (commentEnd < 0)
         return false
+      cursor = commentEnd + 3
+      continue
+    }
+    const isScript = lower.startsWith('<script', start)
+    const isTemplate = !isScript && lower.startsWith('<template', start)
+    if (!isScript && !isTemplate) {
+      cursor = start + 1
+      continue
+    }
+    const nameEnd = start + (isScript ? 7 : 9)
+    const boundary = lower[nameEnd]
+    if (boundary && isAsciiTagNameCharacter(boundary)) {
+      cursor = nameEnd
+      continue
+    }
+    const limit = Math.min(lower.length, start + 4_097)
+    let end = -1
+    let nestedStart = -1
+    let quote = ''
+    for (let index = nameEnd; index < limit; index++) {
+      const character = lower[index]
+      if (quote) {
+        if (character === quote)
+          quote = ''
+        continue
+      }
+      if (character === '"' || character === '\'') {
+        quote = character
+        continue
+      }
+      if (character === '>') {
+        end = index
+        break
+      }
+      if (character === '<') {
+        nestedStart = index
+        break
       }
     }
+    if (end < 0) {
+      cursor = nestedStart >= 0 ? nestedStart : limit
+      continue
+    }
+    const tag = lower.slice(nameEnd, end)
+    if (/(?:^|\s)lang\s*=\s*["']tsx["']/.test(tag))
+      return true
+    if (tag.trimEnd().endsWith('/')) {
+      cursor = end + 1
+      continue
+    }
+    const blockEnd = findVueBlockEnd(lower, end + 1, isScript ? 'script' : 'template')
+    if (blockEnd < 0)
+      return false
+    cursor = blockEnd
   }
-
-  return true
+  return false
 }
 
-function getUserConfigurationStyle(lan: string, mode: 'dark' | 'light') {
-  const keys = Object.keys(config).filter(key => isMatch(key, lan))
-  const result = keys.reduceRight((r, k) => {
-    const value = config[k][mode]
-    r.push(value)
-    return r
-  }, [] as any).filter(Boolean)
+export function getRuleLanguageId(document: TextDocument): string {
+  if (document.languageId !== 'vue')
+    return document.languageId
+  const cached = languageDetectionCache.get(document)
+  if (cached?.version === document.version && cached.languageId === document.languageId)
+    return cached.result
+
+  const documentEnd = Math.min(
+    document.offsetAt(document.lineAt(document.lineCount - 1).rangeIncludingLineBreak.end),
+    MAX_VUE_LANGUAGE_DETECTION_SIZE,
+  )
+  const blockSize = 100_000
+  const chunks: string[] = []
+  for (let start = 0; start < documentEnd; start += blockSize) {
+    const end = Math.min(documentEnd, start + blockSize)
+    chunks.push(document.getText(new Range(document.positionAt(start), document.positionAt(end))))
+  }
+  const result = containsVueTsxBlock(chunks.join('')) ? 'vuetsx' : document.languageId
+  languageDetectionCache.set(document, { languageId: document.languageId, result, version: document.version })
   return result
 }
 
-function isMatch(a: string, b: string) {
-  if (a === b)
-    return true
-  const aMap = a.split('|')
-  const bMap = b.split('|')
-  return aMap.some(i => bMap.includes(i)) || bMap.some(i => aMap.includes(i))
+function buildRuleSelection(config: CompiledConfig, languageId: string, dark: boolean) {
+  const warnings: string[] = []
+  const sourceRules = getRulesForLanguage(config, languageId, dark, warnings)
+  const priorityStyleIds: Array<{ id: string, styleId: string }> = []
+  const layerIds = new Map<string, string>()
+  const rules = sourceRules.flatMap((rule) => {
+    const targetKeys = rule.targets.map((target, targetIndex) => JSON.stringify([rule.layerContextId, targetIndex, target.styleId]))
+    const newLayerCount = new Set(targetKeys.filter(key => !layerIds.has(key))).size
+    if (priorityStyleIds.length + newLayerCount > MAX_PROFILE_LAYERS) {
+      warnings.push(`${rule.context} was omitted because the ${MAX_PROFILE_LAYERS}-layer profile limit was reached`)
+      return []
+    }
+    const targets = rule.targets.map((target, targetIndex) => {
+      const layerKey = targetKeys[targetIndex]
+      let decorationId = layerIds.get(layerKey)
+      if (!decorationId) {
+        decorationId = `d${priorityStyleIds.length}`
+        layerIds.set(layerKey, decorationId)
+        priorityStyleIds.push({ id: decorationId, styleId: target.styleId })
+      }
+      return { ...target, decorationId }
+    })
+    return [{ ...rule, targets }]
+  })
+  return {
+    priorityStyleIds,
+    profileId: `${languageId}:${dark ? 'dark' : 'light'}`,
+    rules,
+    warnings,
+  }
 }
 
-export const { activate, deactivate } = createExtension(() => {
-  // 切换激活文本时检测整个文本，后续只针对更新内容
-  const getLan = () => {
-    let lan = getActiveTextEditorLanguageId()
-    if (!lan)
-      return
+const ruleSelectionCache = new WeakMap<CompiledConfig, Map<string, ReturnType<typeof buildRuleSelection>>>()
+const ruleFingerprintCache = new WeakMap<CompiledRule, string>()
+const vueTsxDetectionCache = new WeakMap<CompiledConfig, Map<boolean, boolean>>()
 
-    switch (lan) {
-      case 'vue':
-        lan = /lang=['"]tsx['"]/.test(getActiveText()!) ? 'vuetsx|vue' : 'vue'
-        break
-      case 'javascriptreact':
-      case 'typescriptreact':
-        lan = 'react|javascriptreact|typescriptreact'
-        break
-      case 'svelte':
-      case 'solid':
-      case 'astro':
-        break
-      case 'plaintext':
-        lan = 'txt|plaintext'
-        break
-      case 'markdown':
-        lan = 'md|markdown'
-        break
+function getRuleFingerprint(rule: CompiledRule): string {
+  const cached = ruleFingerprintCache.get(rule)
+  if (cached)
+    return cached
+  const fingerprint = JSON.stringify([
+    rule.pattern.source,
+    [...rule.pattern.flags].sort().join(''),
+    rule.ignores.map(pattern => [pattern.source, [...pattern.flags].sort().join('')]),
+    rule.targets.map(target => [target.groupIndex ?? null, target.styleId]),
+  ])
+  ruleFingerprintCache.set(rule, fingerprint)
+  return fingerprint
+}
+
+function haveEquivalentRules(left: CompiledRule[], right: CompiledRule[]): boolean {
+  const leftFingerprints = [...new Set(left.map(getRuleFingerprint))]
+  const rightFingerprints = [...new Set(right.map(getRuleFingerprint))]
+  return leftFingerprints.length === rightFingerprints.length
+    && leftFingerprints.every((fingerprint, index) => fingerprint === rightFingerprints[index])
+}
+
+export function needsVueTsxDetection(config: CompiledConfig, dark: boolean): boolean {
+  const cache = vueTsxDetectionCache.get(config) ?? new Map<boolean, boolean>()
+  vueTsxDetectionCache.set(config, cache)
+  const cached = cache.get(dark)
+  if (cached !== undefined)
+    return cached
+  const needed = !haveEquivalentRules(
+    getRulesForLanguage(config, 'vue', dark),
+    getRulesForLanguage(config, 'vuetsx', dark),
+  )
+  cache.set(dark, needed)
+  return needed
+}
+
+function getRuleSelection(config: CompiledConfig, document: TextDocument) {
+  const dark = isDarkTheme()
+  const languageId = document.languageId === 'vue' && needsVueTsxDetection(config, dark)
+    ? getRuleLanguageId(document)
+    : document.languageId
+  const key = `${languageId}:${dark ? 'dark' : 'light'}`
+  const cache = ruleSelectionCache.get(config) ?? new Map<string, ReturnType<typeof buildRuleSelection>>()
+  ruleSelectionCache.set(config, cache)
+  const cached = cache.get(key)
+  if (cached)
+    return cached
+  const selection = buildRuleSelection(config, languageId, dark)
+  cache.set(key, selection)
+  return selection
+}
+
+export function activate(context: ExtensionContext): void {
+  let disposed = false
+  let compiled = compileConfig(getConfiguration('vscode-highlight-text.rules', {}))
+  const initialExcludeWarnings: string[] = []
+  let shouldProcess = getExcludeFilter(initialExcludeWarnings)
+  const output = window.createOutputChannel('vscode-highlight-text')
+  context.subscriptions.push(output)
+  let initialManagerError: unknown
+  let manager = new DecorationManager(compiled.styles)
+  for (const editor of window.visibleTextEditors) {
+    if (
+      !shouldProcess(getDocumentPath(editor.document))
+      || !editor.visibleRanges.length
+      || !getVisibleScanPlan(editor).complete
+    ) {
+      continue
     }
-    return lan
+    const selection = getRuleSelection(compiled, editor.document)
+    try {
+      manager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
+    }
+    catch (error) {
+      initialManagerError ??= error
+      manager.releaseEditor(editor)
+    }
+  }
+  let ruleSnapshots = new WeakMap<TextEditor, Map<string, RuleSnapshot>>()
+  let scanSessions = new WeakMap<TextEditor, ScanSession>()
+  let structuralFailures = new WeakMap<TextEditor, { key: string, ruleIds: Set<string> }>()
+  const executor = new RegexExecutor()
+  const getExecutor = (_editor: TextEditor) => executor
+  const failures = new RuleFailureRegistry<TextDocument>(REGEX_FAILURE_COOLDOWN)
+  const importantWarned = new Set<string>()
+  const warned = new Set<string>()
+  let additionalWarningsSuppressed = false
+  let importantToastCount = 0
+  let warningToastCount = 0
+
+  const warnOnce = (warning: string, important = false) => {
+    const registry = important ? importantWarned : warned
+    if (disposed || registry.has(warning))
+      return
+    if (registry.size >= MAX_REMEMBERED_WARNINGS) {
+      if (!important && !additionalWarningsSuppressed) {
+        output.appendLine(`[${new Date().toISOString()}] Additional warnings have been suppressed`)
+        additionalWarningsSuppressed = true
+      }
+      return
+    }
+    registry.add(warning)
+    output.appendLine(`[${new Date().toISOString()}] ${warning}`)
+    if (important ? importantToastCount >= 5 : warningToastCount >= 5)
+      return
+    if (important)
+      importantToastCount++
+    else
+      warningToastCount++
+    void window.showWarningMessage(`vscode-highlight-text: ${warning}`)
+  }
+  compiled.warnings.forEach(warning => warnOnce(warning))
+  initialExcludeWarnings.forEach(warning => warnOnce(warning))
+  if (initialManagerError)
+    warnOnce(`Failed to apply initial configuration: ${initialManagerError instanceof Error ? initialManagerError.message : String(initialManagerError)}`, true)
+
+  const retryTimers = new Map<TextEditor, { dueAt: number, inputKey: string, timer: ReturnType<typeof setTimeout> }>()
+  let scheduleContinuation = (_editor: TextEditor) => {}
+  let restartSiblingEditors = (_editor: TextEditor, _document: TextDocument) => {}
+  let scheduleRetry = (_editor: TextEditor, _inputKey: string, _delay: number) => {}
+  interface PendingConfiguration {
+    compiled: CompiledConfig
+    excludeWarnings: string[]
+    filter: (path: string) => boolean
+  }
+  let pendingConfiguration: PendingConfiguration | undefined
+  let retryPendingConfiguration = () => false
+  const cancelRetry = (editor: TextEditor) => {
+    const pending = retryTimers.get(editor)
+    if (pending)
+      clearTimeout(pending.timer)
+    retryTimers.delete(editor)
   }
 
-  const updateVStyle = debounce((refresh: boolean) => {
-    // 性能监控
-    const startTime = performance.now()
+  const updateEditor = async (editor: TextEditor, task: LatestTaskContext) => {
+    const document = editor.document
+    const documentVersion = document.version
+    const languageId = document.languageId
+    const isCurrent = () => task.isCurrent()
+      && !disposed
+      && editor.document === document
+      && document.version === documentVersion
+      && document.languageId === languageId
+      && !document.isClosed
+      && window.visibleTextEditors.includes(editor)
 
-    const defaultExclude = getConfiguration('vscode-highlight-text.exclude')
-    const filter = createFilter(defaultExclude)
-    const currentFileUrl = getCurrentFileUrl(true)
-    const stacks: (() => void)[] = []
-    if (!currentFileUrl)
+    if (!isCurrent())
       return
-    if (filter(currentFileUrl.path))
-      return
-    const lan = getLan()
-    if (!lan)
-      return
-
-    // 清理缓存，防止内存泄漏
-    if (Object.keys(clearStyle).length > MAX_CACHE_SIZE) {
-      const cacheKeys = Object.keys(clearStyle)
-      const excessCount = cacheKeys.length - MAX_CACHE_SIZE + 10 // 一次性清理多个，减少频繁清理
-      for (let i = 0; i < excessCount; i++) {
-        const oldestKey = cacheKeys[i]
-        if (clearStyle[oldestKey]) {
-          clearStyle[oldestKey].forEach(clear => clear())
-          clearStyle[oldestKey].clear()
-          delete clearStyle[oldestKey]
-        }
-      }
+    const clearEditor = () => {
+      cancelRetry(editor)
+      ruleSnapshots.delete(editor)
+      scanSessions.delete(editor)
+      manager.releaseEditor(editor)
     }
-
-    // 支持 key 为 'a|b' 的形式
-    const userConfigurationStyles = getUserConfigurationStyle(lan, isDark() ? 'dark' : 'light')
-    if (!userConfigurationStyles.length)
+    if (!shouldProcess(getDocumentPath(document)) || !editor.visibleRanges.length) {
+      if (isCurrent())
+        clearEditor()
       return
-
-    const cacheKey = currentFileUrl.fsPath + currentFileUrl.scheme
-    const cache = clearStyle[cacheKey]
-
-    if (refresh) {
-      // 清除所有缓存并强制重新计算
-      Object.keys(clearStyle).forEach((key) => {
-        Array.from(clearStyle[key].values()).forEach(c => c())
-        clearStyle[key].clear()
-      })
     }
-    else {
-      // 删除其他文件的缓存，保留当前文件
-      Object.keys(clearStyle).forEach((key) => {
-        if (key !== cacheKey) {
-          Array.from(clearStyle[key].values()).forEach(c => c())
-          clearStyle[key].clear()
-        }
-      })
+    const visiblePlan = getVisibleScanPlan(editor)
+    if (!visiblePlan.complete) {
+      cancelRetry(editor)
+      ruleSnapshots.delete(editor)
+      scanSessions.delete(editor)
+      manager.releaseEditor(editor)
+      warnOnce(`Visible scan exceeds ${MAX_SCAN_SIZE} characters in ${document.uri.fsPath}; stale highlights were cleared`)
+      return
     }
-
-    if (!cache)
-      clearStyle[cacheKey] = new Map()
-
-    // Get full text
-    const fullText = getActiveText()!
-    if (!fullText) {
-      clearStyle[cacheKey]?.forEach((clear, key) => {
-        clear()
-        clearStyle[cacheKey].delete(key)
-      })
+    const { priorityStyleIds, profileId, rules, warnings } = getRuleSelection(compiled, document)
+    warnings.forEach(warning => warnOnce(warning))
+    if (!rules.length) {
+      if (isCurrent())
+        clearEditor()
+      return
+    }
+    try {
+      manager.reserveProfile(editor, profileId, priorityStyleIds)
+    }
+    catch (error) {
+      cancelRetry(editor)
+      ruleSnapshots.delete(editor)
+      scanSessions.delete(editor)
+      warnOnce(`Failed to reserve decoration profile: ${error instanceof Error ? error.message : String(error)}`, true)
       return
     }
 
-    // 检查文本大小，防止性能问题
-    if (fullText.length > MAX_TEXT_SIZE) {
-      message.warn(`File too large (${fullText.length} characters), highlighting disabled for performance reasons`)
-      return
-    }
-
-    // Get visible range from active editor
-    const editor = getActiveTextEditor()
-    if (!editor)
-      return
-
-    // Calculate visible range
-    const visibleRange = getVisibleRange(editor.visibleRanges)
-    if (!visibleRange)
-      return
-
-    // Convert range to string indices
-    const startPosition = visibleRange.start
-    const endPosition = visibleRange.end
-    const visibleText = editor.document.getText(createRange(startPosition, endPosition))
-
-    // Process only the visible text
-    let text = visibleText
-    const visibleStartOffset = editor.document.offsetAt(startPosition)
-
-    // Run function with offset adjustment
-    const runWithOffset = (matchText: string, matcher: RegExpExecArray, styleOption: DecorationRenderOptions) => {
-      const style = createStyle(wrapperStyleForBackGround(styleOption))
-      // 以免之前的匹配干扰
-      let textSegment = matcher[0]
-      for (let index = 1; index < matcher.length; index++) {
-        const matchWord = matcher[index]
-        if (!matchWord)
-          continue
-
-        if (matchWord === matchText)
-          break
-
-        textSegment = textSegment.replace(matchWord, '嘿'.repeat(matchWord.length))
-      }
-
-      // Add offset to match index to account for visible range
-      const start = visibleStartOffset + matcher.index! + textSegment.indexOf(matchText)
-      const end = start + (matchText.length)
-      const range = createRange(getPosition(start).position, getPosition(end).position)
-
-      // Check if range is valid before proceeding
-      if (range.start.line < 0 || range.end.line < 0)
+    const sessionKey = JSON.stringify([getDocumentCacheIdentity(document), documentVersion, visiblePlan.scanKey, profileId])
+    let session = scanSessions.get(editor)
+    const scanPlan = session?.key === sessionKey ? session.scanPlan : getScanSlices(editor, visiblePlan)
+    const previousSnapshots = ruleSnapshots.get(editor) ?? new Map<string, RuleSnapshot>()
+    const canPreservePrevious = previousSnapshots.size > 0 && [...previousSnapshots.values()].every(
+      snapshot => snapshot.documentVersion === documentVersion && snapshot.scanKey === scanPlan.scanKey,
+    )
+    const clearStaleSnapshot = () => {
+      if (canPreservePrevious)
         return
+      ruleSnapshots.delete(editor)
+      manager.clearRanges(editor)
+    }
+    const failureInputKey = JSON.stringify([documentVersion, scanPlan.scanKey])
+    const pendingRetry = retryTimers.get(editor)
+    if (pendingRetry && pendingRetry.inputKey !== failureInputKey)
+      cancelRetry(editor)
+    let structuralFailure = structuralFailures.get(editor)
+    if (!structuralFailure || structuralFailure.key !== sessionKey) {
+      structuralFailure = { key: sessionKey, ruleIds: new Set() }
+      structuralFailures.set(editor, structuralFailure)
+    }
+    if (!session || session.key !== sessionKey) {
+      session = {
+        acceptedRangeKeys: new Set(),
+        candidateKeys: new Set(),
+        candidateSnapshot: new Map(),
+        currentRuleMatchCount: 0,
+        continuationCount: 0,
+        elapsedScanTime: 0,
+        failedRuleIds: new Set(),
+        infrastructureRetryCount: 0,
+        workerJobCount: 0,
+        key: sessionKey,
+        nextRuleIndex: 0,
+        nextSliceIndex: 0,
+        previousSnapshots,
+        scannedSnapshots: new Map(),
+        scanPlan,
+      }
+      scanSessions.set(editor, session)
+    }
+    const budget = new RefreshBudget(MAX_TOTAL_RANGES, Number.POSITIVE_INFINITY)
+    for (let index = 0; index < session.acceptedRangeKeys.size; index++)
+      budget.consumeRange()
+    const acceptPreviousSnapshot = (ruleId: string) => {
+      const previous = previousSnapshots.get(ruleId)
+      if (previous?.documentVersion !== documentVersion || previous.scanKey !== scanPlan.scanKey)
+        return
+      const newKeys = new Set<string>()
+      for (const [styleId, ranges] of previous.rangesByStyle) {
+        for (const range of ranges) {
+          const start = document.offsetAt(range.start)
+          const end = document.offsetAt(range.end)
+          const key = `${styleId}:${start}-${end}`
+          if (!session.acceptedRangeKeys.has(key))
+            newKeys.add(key)
+        }
+      }
+      if (newKeys.size > budget.remainingRanges) {
+        previousSnapshots.delete(ruleId)
+        warnOnce(`Previous highlight snapshot was discarded in ${document.uri.fsPath}: ${newKeys.size} ranges exceed the remaining refresh budget`)
+        return
+      }
+      for (const key of newKeys) {
+        budget.consumeRange()
+        session.acceptedRangeKeys.add(key)
+      }
+    }
+    const executor = getExecutor(editor)
+    let infrastructureFailed = false
+    let infrastructureRetryAfterMs = 5_000
+    let needsContinuation = false
+    let sessionLimitReached = false
+    let chunkJobCount = 0
+    let chunkExecutionMs = 0
+    let chunkTimeoutCount = 0
 
-      const rangeText = fullText.slice(start, end)
-      const positionKey = createPositionKey(range, rangeText, styleOption)
+    while (session.nextRuleIndex < rules.length) {
+      if (!isCurrent())
+        return
+      if (chunkExecutionMs >= MAX_TOTAL_SCAN_TIME) {
+        needsContinuation = true
+        break
+      }
+      if (budget.exhausted) {
+        const skipped = rules.length - session.nextRuleIndex
+        for (let index = session.nextRuleIndex; index < rules.length; index++) {
+          session.failedRuleIds.add(rules[index].id)
+          acceptPreviousSnapshot(rules[index].id)
+        }
+        session.nextRuleIndex = rules.length
+        warnOnce(`Highlight range budget was exhausted in ${document.uri.fsPath}; ${skipped} remaining rules were skipped`, true)
+        break
+      }
+      const rule = rules[session.nextRuleIndex]
+      const failureStatus = failures.getStatus(document, rule.id, failureInputKey)
+      if (failureStatus.disabled || structuralFailure.ruleIds.has(rule.id)) {
+        if (failureStatus.disabled)
+          scheduleRetry(editor, failureInputKey, failureStatus.retryAfterMs)
+        session.failedRuleIds.add(rule.id)
+        acceptPreviousSnapshot(rule.id)
+        resetCurrentRuleState(session)
+        session.nextRuleIndex++
+        continue
+      }
 
-      if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
-        const clear = clearStyle[cacheKey].get(positionKey)!
-        stacks.push(() => clearStyle[cacheKey]?.set(positionKey, clear))
-        clearStyle[cacheKey].delete(positionKey)
+      let candidateExceeded = false
+      let ruleFailed = false
+      const remainingRangeBudget = budget.remainingRanges
+      while (session.nextSliceIndex < scanPlan.slices.length) {
+        if (!isCurrent())
+          return
+        if (chunkExecutionMs >= MAX_TOTAL_SCAN_TIME) {
+          needsContinuation = true
+          break
+        }
+        const slice = scanPlan.slices[session.nextSliceIndex]
+        if (
+          session.elapsedScanTime >= MAX_SESSION_SCAN_TIME
+          || session.workerJobCount >= MAX_SESSION_JOBS
+        ) {
+          sessionLimitReached = true
+          break
+        }
+        if (chunkJobCount >= MAX_JOBS_PER_CHUNK || chunkTimeoutCount >= MAX_TIMEOUTS_PER_CHUNK) {
+          needsContinuation = true
+          break
+        }
+        const remainingChunkMs = MAX_TOTAL_SCAN_TIME - chunkExecutionMs
+        const remainingSessionMs = MAX_SESSION_SCAN_TIME - session.elapsedScanTime
+        const remainingBudgetMs = Math.min(remainingChunkMs, remainingSessionMs)
+        const executionTimeoutMs = Math.max(1, Math.min(REGEX_EXECUTION_TIMEOUT, remainingBudgetMs))
+        const deadlineKind = remainingBudgetMs <= REGEX_EXECUTION_TIMEOUT ? 'scan-budget' : 'regex-timeout'
+        const budgetEndsSession = remainingSessionMs <= remainingChunkMs && remainingSessionMs <= REGEX_EXECUTION_TIMEOUT
+        try {
+          const scanResult = await scanRule(
+            executor,
+            rule,
+            slice,
+            task.signal,
+            MAX_MATCHES_PER_RULE,
+            session.currentRuleMatchCount,
+            MAX_TOTAL_RANGES,
+            false,
+            { deadlineKind, timeoutMs: executionTimeoutMs },
+          )
+          if (!isCurrent())
+            return
+          session.elapsedScanTime += scanResult.executionMs
+          chunkExecutionMs += scanResult.executionMs
+          session.workerJobCount++
+          chunkJobCount++
+          for (const match of scanResult.ranges) {
+            const rangeKey = `${match.styleId}:${match.start}-${match.end}`
+            if (session.acceptedRangeKeys.has(rangeKey) || session.candidateKeys.has(rangeKey))
+              continue
+            if (session.candidateKeys.size >= remainingRangeBudget) {
+              candidateExceeded = true
+              break
+            }
+            session.candidateKeys.add(rangeKey)
+            const ranges = session.candidateSnapshot.get(match.styleId) ?? []
+            ranges.push({ end: match.end, start: match.start })
+            session.candidateSnapshot.set(match.styleId, ranges)
+          }
+          session.currentRuleMatchCount += scanResult.acceptedMatchCount
+          session.infrastructureRetryCount = 0
+          if (scanResult.truncated) {
+            session.nextSliceIndex = scanPlan.slices.length
+            warnOnce(`${rule.context}: Main pattern exceeded ${MAX_MATCHES_PER_RULE} matches in ${document.uri.fsPath}; the first ${MAX_MATCHES_PER_RULE} matches were retained`)
+          }
+          else {
+            session.nextSliceIndex++
+          }
+        }
+        catch (error) {
+          if (!isCurrent() || isRegexExecutionAbortedError(error))
+            return
+          const executionMs = getExecutionDuration(error)
+          session.elapsedScanTime += executionMs
+          chunkExecutionMs += executionMs
+          session.workerJobCount++
+          chunkJobCount++
+          ruleFailed = true
+          const pattern = `/${rule.pattern.source}/${rule.pattern.flags}`
+          if (isRegexExecutionBudgetError(error)) {
+            ruleFailed = false
+            if (budgetEndsSession)
+              sessionLimitReached = true
+            else
+              needsContinuation = true
+          }
+          else if (isRegexExecutionInfrastructureError(error)) {
+            infrastructureFailed = true
+            infrastructureRetryAfterMs = error.retryAfterMs
+            warnOnce(`Regular expression worker is temporarily unavailable in ${document.uri.fsPath}: ${error.message}`, true)
+          }
+          else if (isRegexExecutionTimeoutError(error)) {
+            chunkTimeoutCount++
+            session.failedRuleIds.add(rule.id)
+            acceptPreviousSnapshot(rule.id)
+            const failureStatus = failures.recordFailure(document, rule.id, failureInputKey)
+            scheduleRetry(editor, failureInputKey, failureStatus.retryAfterMs)
+            restartSiblingEditors(editor, document)
+            warnOnce(`${rule.context}: rule execution (including ignoreReg) for ${pattern} exceeded ${error.timeoutMs}ms in ${document.uri.fsPath}; will be retried automatically while the editor remains visible, or after the input changes`, true)
+          }
+          else if (isRegexExecutionLimitError(error)) {
+            session.failedRuleIds.add(rule.id)
+            acceptPreviousSnapshot(rule.id)
+            structuralFailure.ruleIds.add(rule.id)
+            warnOnce(`${rule.context}: ${pattern} was skipped in ${document.uri.fsPath}: ${error.message}`)
+          }
+          else {
+            session.failedRuleIds.add(rule.id)
+            acceptPreviousSnapshot(rule.id)
+            warnOnce(`${rule.context}: ${pattern} failed in ${document.uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          break
+        }
+        if (candidateExceeded)
+          break
+      }
+      if (sessionLimitReached || needsContinuation || infrastructureFailed)
+        break
+      if (!ruleFailed && !candidateExceeded && session.nextSliceIndex < scanPlan.slices.length)
+        continue
+      if (!ruleFailed) {
+        if (candidateExceeded) {
+          session.scannedSnapshots.set(rule.id, new Map())
+          warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: it exceeds the remaining ${remainingRangeBudget} range budget`)
+        }
+        else {
+          const newKeys = [...session.candidateKeys].filter(key => !session.acceptedRangeKeys.has(key))
+          if (newKeys.length > budget.remainingRanges) {
+            session.scannedSnapshots.set(rule.id, new Map())
+            warnOnce(`${rule.context}: rule output was skipped in ${document.uri.fsPath}: ${newKeys.length} ranges exceed the remaining refresh budget`)
+          }
+          else {
+            for (const key of newKeys) {
+              budget.consumeRange()
+              session.acceptedRangeKeys.add(key)
+            }
+            const rangesByStyle = new Map<string, VscodeRange[]>()
+            for (const [styleId, pendingRanges] of session.candidateSnapshot) {
+              rangesByStyle.set(styleId, pendingRanges.map(({ end, start }) => (
+                new Range(document.positionAt(start), document.positionAt(end))
+              )))
+            }
+            session.scannedSnapshots.set(rule.id, rangesByStyle)
+          }
+        }
+      }
+      resetCurrentRuleState(session)
+      session.nextRuleIndex++
+    }
+
+    if (sessionLimitReached) {
+      for (let index = session.nextRuleIndex; index < rules.length; index++) {
+        session.failedRuleIds.add(rules[index].id)
+        acceptPreviousSnapshot(rules[index].id)
+      }
+      session.nextRuleIndex = rules.length
+      resetCurrentRuleState(session)
+      warnOnce(`Highlight scan session limit reached in ${document.uri.fsPath}; remaining rules were skipped`)
+    }
+
+    if (infrastructureFailed) {
+      clearStaleSnapshot()
+      session.infrastructureRetryCount++
+      if (session.infrastructureRetryCount <= 3)
+        scheduleRetry(editor, failureInputKey, infrastructureRetryAfterMs)
+      else
+        scanSessions.delete(editor)
+      return
+    }
+    if (needsContinuation) {
+      session.continuationCount++
+      if (session.continuationCount > MAX_SESSION_CONTINUATIONS) {
+        for (let index = session.nextRuleIndex; index < rules.length; index++) {
+          session.failedRuleIds.add(rules[index].id)
+          acceptPreviousSnapshot(rules[index].id)
+        }
+        session.nextRuleIndex = rules.length
+        warnOnce(`Highlight continuation limit reached in ${document.uri.fsPath}; remaining rules were skipped`)
       }
       else {
-        stacks.push(() => clearStyle[cacheKey]?.set(positionKey, setStyle(style, range)!))
-      }
-    }
-
-    // Process configuration styles for visible text only
-    for (const userConfigurationStyle of userConfigurationStyles) {
-      for (const color in userConfigurationStyle) {
-        let option = userConfigurationStyle[color] as (string | [string, string])[] | UserConfig
-        const baseOption: any = { color, isWholeLine: false, rangeBehavior: DecorationRangeBehavior.ClosedClosed }
-        let styleOption: any = baseOption
-        if (!Array.isArray(option) && option.match) {
-          styleOption = Object.assign({ ...styleOption, color }, option, { after: option.after }, { before: option.before }) as any
-          option = option.match
-        }
-
-        if (Array.isArray(option) && option.length) {
-          option.forEach((o) => {
-            try {
-              const reg = isArray(o)
-                ? getCachedRegex(o[0], o[1] || 'gm')
-                : getCachedRegex(o, 'gm')
-
-              // 验证正则表达式安全性
-              if (!isRegexSafe(reg)) {
-                message.warn(`Potentially unsafe regex detected: ${reg.source}`)
-                return
-              }
-
-              // 如果有 colors 字段
-              const colors = styleOption.colors
-              const matchCss = styleOption.matchCss
-              const ignoreReg = styleOption.ignoreReg
-              if (ignoreReg?.length) {
-                for (const regStr of ignoreReg.filter(Boolean)) {
-                  const regIgnore = isArray(regStr)
-                    ? getCachedRegex(regStr[0], regStr[1])
-                    : getCachedRegex(regStr, 'gm')
-                  text = safeReplace(text, regIgnore, (_: string) => ' '.repeat(_.length), 1000)
-                }
-              }
-              for (const matcher of safeMatchAll(text, reg)) {
-                if (isArray(matchCss)) {
-                  for (let i = 0; i < matchCss.length; i++) {
-                    const option = matchCss[i]
-                    if (!option)
-                      break
-                    if (!isObject(option))
-                      return message.error('matchCss 类型错误')
-                    const matchText = matcher[i + 1]
-                    if (matchText === undefined && matcher[i + 2] === undefined)
-                      break
-
-                    if (!matchText)
-                      continue
-                    runWithOffset(matchText, matcher, Object.assign({ ...baseOption }, option))
-                  }
-                }
-                else if (isArray(colors)) {
-                  for (let i = 0; i < colors.length; i++) {
-                    const color = colors[i]
-                    if (!color)
-                      continue
-                    const matchText = matcher[i + 1]
-                    if (matchText === undefined && matcher[i + 2] === undefined)
-                      break
-                    if (!matchText)
-                      continue
-
-                    runWithOffset(matchText, matcher, { ...baseOption, color })
-                  }
-                }
-                else if (!colors) {
-                  let matchText
-                  // 忽略 undefined 的 match 项
-                  if (matcher.length > 1) {
-                    for (let i = 1; i < matcher.length; i++) {
-                      matchText = matcher[i]
-                      if (matchText !== undefined)
-                        break
-                    }
-                  }
-                  else { matchText = matcher[0] }
-                  if (!matchText)
-                    continue
-                  // 这里不能一个个设置，之前的样式会丢失
-                  // 以免之前的匹配干扰
-                  let textSegment = matcher[0]
-                  for (let index = 1; index < matcher.length; index++) {
-                    const matchWord = matcher[index]
-                    if (matchWord === matchText) {
-                      break
-                    }
-                    textSegment = textSegment.replace(matchWord, '嘿'.repeat(matchWord.length))
-                  }
-                  const start = visibleStartOffset + matcher.index! + textSegment.indexOf(matchText)
-                  const end = start + matchText.length
-                  const range = createRange(getPosition(start).position, getPosition(end).position)
-                  const rangeText = fullText.slice(start, end)
-                  const positionKey = createPositionKey(range, rangeText, styleOption)
-                  const style = createStyle(wrapperStyleForBackGround(styleOption))
-                  if (clearStyle[cacheKey] && clearStyle[cacheKey].has(positionKey)) {
-                    const clear = clearStyle[cacheKey].get(positionKey)!
-                    stacks.push(() => clearStyle[cacheKey]?.set(positionKey, clear))
-                    clearStyle[cacheKey].delete(positionKey)
-                  }
-                  else {
-                    stacks.push(() => clearStyle[cacheKey]?.set(positionKey, setStyle(style, range)!))
-                  }
-                }
-                else if (colors && !isArray(colors)) {
-                  return message.error(`colors 字段类型错误，需要是 colorsArray`)
-                }
-                else if (matchCss && !isArray(matchCss)) {
-                  return message.error(`matchCss 字段类型错误，需要是 styleArray`)
-                }
-              }
-            }
-            catch (error) {
-              message.error(`Error processing regex pattern: ${error}`)
-              console.error('Regex error:', error)
-            }
-          })
-        }
-      }
-    }
-
-    // 将剩余 clearStyle 中 cache 清除，再增加 stacks 中需要新增的
-    clearStyle[cacheKey]?.forEach((clear, key) => {
-      clear()
-      clearStyle[cacheKey].delete(key)
-    })
-    stacks.forEach(add => add())
-
-    // 性能监控
-    const endTime = performance.now()
-    const executionTime = endTime - startTime
-    if (executionTime > 100) { // 如果执行时间超过100ms，记录警告
-      console.warn(`updateVStyle execution took ${executionTime.toFixed(2)}ms`)
-    }
-  }, 300)
-
-  updateVStyle()
-
-  return [
-    addEventListener('text-change', ({ document, contentChanges }) => {
-      const change = contentChanges.filter(item => item.rangeLength || item.text)
-      if (document.languageId !== 'Log' && change.length)
-        updateVStyle()
-    }),
-    addEventListener('activeText-change', (e) => {
-      if (e) {
-        // 使用 setTimeout 确保文本完全加载后再处理
-        setTimeout(() => {
-          updateVStyle(true)
-        }, 10)
-      }
-    }),
-    addEventListener('config-change', (e) => {
-      if (e.affectsConfiguration('vscode-highlight-text')) {
-        config = getConfiguration('vscode-highlight-text.rules', defaultConfig)
-      }
-    }),
-    addEventListener('theme-change', () => updateVStyle(true)),
-    addEventListener('text-visible-change', (e) => {
-      if (e)
-        updateVStyle(false)
-    }),
-    registerCommand('vscode-highlight-text.selectTemplate', () => {
-      const options = Object.keys(templates)
-      if (!options.length)
+        clearStaleSnapshot()
+        queueMicrotask(() => {
+          if (isCurrent())
+            scheduleContinuation(editor)
+        })
         return
-      createSelect(options).then((select: any) => {
-        if (!select)
-          return
-        const templateConfig = (templates as any)[select]
-        const userConfig = getConfiguration('vscode-highlight-text.rules')
-        // 把用户的 config 和 模板的 config 合并
-        const mergeConfig = deepMerge(userConfig, templateConfig)
-        setConfiguration('vscode-highlight-text.rules', mergeConfig).then(() => {
-          updateVStyle(true)
-        })
-      })
-    }),
-  ]
-}, () => {
-  // 彻底清理所有缓存，防止内存泄漏
-  try {
-    Object.keys(clearStyle).forEach((key) => {
-      // 执行还原函数
-      if (clearStyle[key]) {
-        clearStyle[key].forEach((clear) => {
-          try {
-            clear()
-          }
-          catch (error) {
-            console.error('Error clearing style:', error)
-          }
-        })
-        clearStyle[key].clear()
-        delete clearStyle[key]
       }
+    }
+    scanSessions.delete(editor)
+    const { failedRuleIds, scannedSnapshots } = session
+    if (isCurrent()) {
+      const nextSnapshots = new Map<string, RuleSnapshot>()
+      for (const rule of rules) {
+        const previous = previousSnapshots.get(rule.id)
+        const snapshot = failedRuleIds.has(rule.id)
+          ? previous?.documentVersion === documentVersion && previous.scanKey === scanPlan.scanKey ? previous : undefined
+          : { documentVersion, scanKey: scanPlan.scanKey, rangesByStyle: scannedSnapshots.get(rule.id) ?? new Map() }
+        if (snapshot)
+          nextSnapshots.set(rule.id, snapshot)
+      }
+      const rangesByStyle = aggregateSnapshots(
+        [...nextSnapshots.values()].map(snapshot => snapshot.rangesByStyle),
+        MAX_TOTAL_RANGES,
+        (_styleId, range) => `${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`,
+      )
+      if (!rangesByStyle) {
+        clearStaleSnapshot()
+        warnOnce(`Final highlight snapshot exceeded ${MAX_TOTAL_RANGES} ranges in ${document.uri.fsPath}; stale highlights were cleared when necessary`, true)
+        return
+      }
+      ruleSnapshots.set(editor, nextSnapshots)
+      manager.apply(editor, rangesByStyle, profileId, priorityStyleIds)
+    }
+  }
+
+  const scheduler = new LatestTaskScheduler<TextEditor>(
+    updateEditor,
+    UPDATE_DELAY,
+    error => warnOnce(error instanceof Error ? error.message : String(error), true),
+  )
+  scheduleContinuation = editor => scheduler.schedule(editor, true)
+  restartSiblingEditors = (editor, document) => {
+    for (const sibling of window.visibleTextEditors) {
+      if (sibling !== editor && sibling.document === document)
+        scheduler.schedule(sibling, true)
+    }
+  }
+  scheduleRetry = (editor, inputKey, delay) => {
+    const retryDelay = Math.max(0, delay)
+    const dueAt = Date.now() + retryDelay
+    const previous = retryTimers.get(editor)
+    if (previous && previous.inputKey === inputKey && previous.dueAt <= dueAt)
+      return
+    if (previous)
+      clearTimeout(previous.timer)
+    const document = editor.document
+    let entry: { dueAt: number, inputKey: string, timer: ReturnType<typeof setTimeout> }
+    const timer = setTimeout(() => {
+      if (retryTimers.get(editor) !== entry)
+        return
+      retryTimers.delete(editor)
+      if (
+        !disposed
+        && !document.isClosed
+        && editor.document === document
+        && window.visibleTextEditors.includes(editor)
+      ) {
+        scheduler.schedule(editor, true)
+      }
+    }, retryDelay)
+    entry = { dueAt, inputKey, timer }
+    retryTimers.set(editor, entry)
+  }
+
+  const refreshVisibleEditors = (immediate = true) => {
+    const visible = new Set(window.visibleTextEditors)
+    for (const editor of visible) {
+      if (!shouldProcess(getDocumentPath(editor.document)) || !editor.visibleRanges.length) {
+        manager.releaseEditor(editor)
+        continue
+      }
+      if (!getVisibleScanPlan(editor).complete) {
+        manager.releaseEditor(editor)
+        continue
+      }
+      const selection = getRuleSelection(compiled, editor.document)
+      if (!selection.rules.length) {
+        manager.releaseEditor(editor)
+        continue
+      }
+      try {
+        manager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
+      }
+      catch (error) {
+        warnOnce(`Failed to reserve decoration profile: ${error instanceof Error ? error.message : String(error)}`, true)
+      }
+    }
+    for (const editor of scheduler.keys) {
+      if (!visible.has(editor)) {
+        scheduler.remove(editor)
+        cancelRetry(editor)
+        ruleSnapshots.delete(editor)
+        scanSessions.delete(editor)
+        manager.releaseEditor(editor)
+      }
+    }
+    window.visibleTextEditors.forEach(editor => scheduler.schedule(editor, immediate))
+  }
+
+  const refreshForTheme = () => {
+    for (const editor of window.visibleTextEditors) {
+      scheduler.invalidate(editor)
+      cancelRetry(editor)
+      manager.releaseEditor(editor)
+    }
+    ruleSnapshots = new WeakMap()
+    refreshVisibleEditors(true)
+  }
+
+  const applyConfiguration = (candidate: PendingConfiguration): boolean => {
+    let nextManager: DecorationManager | undefined
+    try {
+      nextManager = new DecorationManager(candidate.compiled.styles)
+      for (const editor of window.visibleTextEditors) {
+        if (
+          !candidate.filter(getDocumentPath(editor.document))
+          || !editor.visibleRanges.length
+          || !getVisibleScanPlan(editor).complete
+        ) {
+          continue
+        }
+        const selection = getRuleSelection(candidate.compiled, editor.document)
+        nextManager.reserveProfile(editor, selection.profileId, selection.priorityStyleIds)
+      }
+    }
+    catch (error) {
+      nextManager?.dispose()
+      pendingConfiguration = error instanceof DecorationBudgetExceededError ? candidate : undefined
+      warnOnce(`Failed to apply configuration: ${error instanceof Error ? error.message : String(error)}`, true)
+      return false
+    }
+    pendingConfiguration = undefined
+    window.visibleTextEditors.forEach((editor) => {
+      scheduler.invalidate(editor)
+      cancelRetry(editor)
     })
-    // 确保对象完全清空
-    Object.keys(clearStyle).forEach(key => delete clearStyle[key])
+    const previousManager = manager
+    manager = nextManager
+    compiled = candidate.compiled
+    shouldProcess = candidate.filter
+    ruleSnapshots = new WeakMap()
+    scanSessions = new WeakMap()
+    structuralFailures = new WeakMap()
+    failures.clear()
+    executor.resetCache()
+    importantWarned.clear()
+    warned.clear()
+    additionalWarningsSuppressed = false
+    importantToastCount = 0
+    warningToastCount = 0
+    compiled.warnings.forEach(warning => warnOnce(warning))
+    candidate.excludeWarnings.forEach(warning => warnOnce(warning))
+    previousManager.clearEditors()
+    previousManager.dispose()
+    refreshVisibleEditors(true)
+    return true
+  }
+  retryPendingConfiguration = () => {
+    const candidate = pendingConfiguration
+    return candidate ? applyConfiguration(candidate) : false
+  }
 
-    // 清理正则缓存
-    REGEX_CACHE.clear()
-  }
-  catch (error) {
-    console.error('Error during deactivation:', error)
-  }
-})
+  context.subscriptions.push(
+    workspace.onDidChangeTextDocument((event) => {
+      for (const editor of window.visibleTextEditors) {
+        if (editor.document !== event.document || !event.contentChanges.length)
+          continue
+        cancelRetry(editor)
+        scheduler.schedule(editor)
+      }
+    }),
+    workspace.onDidCloseTextDocument((document) => {
+      failures.clearDocument(document)
+      for (const editor of [...scheduler.keys]) {
+        if (editor.document !== document)
+          continue
+        scheduler.remove(editor)
+        cancelRetry(editor)
+        ruleSnapshots.delete(editor)
+        scanSessions.delete(editor)
+        manager.forgetEditor(editor)
+      }
+      retryPendingConfiguration()
+    }),
+    workspace.onDidOpenTextDocument((document) => {
+      for (const editor of window.visibleTextEditors) {
+        if (editor.document === document)
+          scheduler.schedule(editor, true)
+      }
+    }),
+    window.onDidChangeActiveTextEditor((editor) => {
+      if (retryPendingConfiguration())
+        return
+      if (editor)
+        scheduler.schedule(editor, true)
+      else
+        refreshVisibleEditors()
+    }),
+    window.onDidChangeTextEditorVisibleRanges(event => scheduler.schedule(event.textEditor)),
+    window.onDidChangeVisibleTextEditors(() => {
+      if (!retryPendingConfiguration())
+        refreshVisibleEditors()
+    }),
+    workspace.onDidChangeConfiguration((event) => {
+      const rulesChanged = event.affectsConfiguration('vscode-highlight-text.rules')
+      const excludeChanged = event.affectsConfiguration('vscode-highlight-text.exclude')
+      if (!rulesChanged && !excludeChanged)
+        return
+      if (!rulesChanged) {
+        const excludeWarnings: string[] = []
+        const nextFilter = getExcludeFilter(excludeWarnings)
+        if (pendingConfiguration) {
+          applyConfiguration({
+            ...pendingConfiguration,
+            excludeWarnings,
+            filter: nextFilter,
+          })
+          return
+        }
+        shouldProcess = nextFilter
+        excludeWarnings.forEach(warning => warnOnce(warning))
+        window.visibleTextEditors.forEach(editor => scheduler.invalidate(editor))
+        refreshVisibleEditors(true)
+        return
+      }
+      const excludeWarnings: string[] = []
+      const candidate = {
+        compiled: compileConfig(getConfiguration('vscode-highlight-text.rules', {})),
+        excludeWarnings,
+        filter: getExcludeFilter(excludeWarnings),
+      }
+      pendingConfiguration = undefined
+      applyConfiguration(candidate)
+    }),
+    window.onDidChangeActiveColorTheme(() => {
+      if (!retryPendingConfiguration())
+        refreshForTheme()
+    }),
+    commands.registerCommand('vscode-highlight-text.selectTemplate', async () => {
+      const select = await createSelect(Object.keys(templates))
+      if (!select)
+        return
+      const userConfig = getConfiguration('vscode-highlight-text.rules', {})
+      await setConfiguration('vscode-highlight-text.rules', deepMerge(userConfig, (templates as Record<string, object>)[select]))
+    }),
+    {
+      dispose: () => {
+        disposed = true
+        scheduler.dispose()
+        retryTimers.forEach(({ timer }) => clearTimeout(timer))
+        retryTimers.clear()
+        executor.dispose()
+        manager.dispose()
+      },
+    },
+  )
 
-function wrapperStyleForBackGround(styleOption: any) {
-  if (styleOption.background) {
-    if (!styleOption.textDecoration) {
-      styleOption.textDecoration = `none; background:${styleOption.background}`
-    }
-    else {
-      styleOption.textDecoration = `${styleOption.textDecoration}${styleOption.textDecoration.endsWith(';') ? '' : ';'} background:${styleOption.background}`
-    }
-  }
-  return styleOption
+  refreshVisibleEditors()
 }
 
-function getVisibleRange(visibleRanges: readonly Range[]) {
-  if (!visibleRanges.length)
-    return
-  const range = visibleRanges[0]
-  const start = range.start
-  const lastRange = visibleRanges[visibleRanges.length - 1]
-  const end = lastRange.end
-  return {
-    start,
-    end,
-  }
-}
+export function deactivate(): void {}
 
-// 优化positionKey生成，避免重复JSON.stringify
-function createPositionKey(range: Range, rangeText: string, styleOption: any): string {
-  // 使用更高效的字符串拼接，避免JSON.stringify的性能开销
-  const styleHash = typeof styleOption === 'object'
-    ? Object.keys(styleOption).sort().map(k => `${k}:${styleOption[k]}`).join('|')
-    : String(styleOption)
-
-  return `${range.start.line},${range.start.character},${range.end.line},${range.end.character},${rangeText},${styleHash}`
+function getExcludeFilter(warnings?: string[]): (path: string) => boolean {
+  const value = getConfiguration('vscode-highlight-text.exclude', ['**/dist/**', '**/node_modules/**'])
+  return createExcludeFilter(value, warnings)
 }

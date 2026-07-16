@@ -9,6 +9,8 @@
 
 ## Configuration
 > ⚠️ 请注意下面表示的是配置的类型, 如何配置可以参考 [shared rules](https://github.com/Simon-He95/vscode-highlight-text/issues/5)
+>
+> 兼容性说明：请使用 `backgroundColor` 设置高亮背景色。旧的 `background` 字段仍可作为颜色值的废弃别名使用，但不再支持 CSS 渐变、图片和 shorthand 值。
 
 ```json
 // 自定义设置高亮样式, 请注意下面表示的是配置的类型, 如何配置可以参考这个链接
@@ -218,16 +220,24 @@
 
 ### 3. 你可以使用 `ignoreReg` 去过滤不需要的内容
   ```md
-   "match": ["(function)\\s+([\\w]*)"], this regular match matches `match1: function` and `match2: functionName`
+   "match": [":is"],
    "ignoreReg": [
-    "```([^`])+```" // 我不希望 match 的内容是在 ``` 和 ``` 之间的
+    "`[^`]*`" // 忽略扫描上下文内行内代码中的匹配
    ]
    ```
 
 ### 4. 支持 RegExp 的 flags 传入
   ```md
-   "red": ["[0-9]+","gm"]
+   "red": [["[0-9]+", "gm"]]
    ```
+
+## 性能与限制
+
+为保持 VS Code Extension Host 响应流畅，高亮处理设有明确边界：单次可见扫描最多 200,000 个 UTF-16 单元、每条规则保留前 1,000 个有效匹配（超出部分截断并警告）、完整刷新最多保留 10,000 个 ranges、每个扫描分片累计最多 1,000ms 的 worker 正则执行时间、每个 worker 任务最多 500ms、仅超时规则冷却 30 秒、每个 profile 最多 300 个 layers、每个活动 manager 最多 1,500 个 decoration types。扫描时间预算耗尽后，会从下一条未处理规则自动继续。扩展使用一个共享正则 worker，因此多个可见编辑器不会并发运行正则 worker。Vue TSX 检测最多检查前 300,000 个 UTF-16 单元；Vue 与 Vue TSX 规则相同时会跳过检测。
+
+高亮采用可见区扫描。每次正则输入包含可见范围及其两侧最多各 20 个物理行的上下文；多个可见范围共享 200,000 个 UTF-16 单元的总预算。`match` 和 `ignoreReg` 都只能看到该输入，因此依赖更远上下文的表达式（例如很长的 Markdown fence、HTML 注释、跨折叠区域结构或文件开头锚点）不能保证获得完整文档语义。
+
+React aliases 的重叠优先级是确定的：精确语言（`javascriptreact` 或 `typescriptreact`）高于 sibling alias，sibling alias 高于通用 `react`。达到限制或配置无效时，会通过 VS Code 警告消息提示。
 
 ## Show your style
 
